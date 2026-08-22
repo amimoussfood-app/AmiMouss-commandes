@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, Minus, Trash2, X, Check, Clock, Search, Users, ClipboardList,
   Settings, LogOut, Copy, Pencil, ShieldCheck, ArrowLeft, FileText,
-  Printer, Truck, Receipt, User, Boxes, PackagePlus, AlertTriangle
+  Printer, Truck, Receipt, User, Boxes, PackagePlus, AlertTriangle, UserCog, KeyRound
 } from "lucide-react";
 
 // ==================== SUPABASE ====================
@@ -100,12 +100,15 @@ export default function App() {
   const [clients, setClients] = useState([]);
   const [rawMaterials, setRawMaterials] = useState([]);
   const [recipeItems, setRecipeItems] = useState([]);
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [activityLog, setActivityLog] = useState([]);
   const [settings, setSettingsState] = useState({ id: 1, admin_code: null, next_bl: 1, next_facture: 1 });
   const [company, setCompany] = useState({ name: "", ice: "", rc: "", address: "", phone: "", email: "" });
   const [toast, setToast] = useState("");
 
   const [mode, setMode] = useState("client-login");
   const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [currentAdmin, setCurrentAdmin] = useState(null); // { name, role: 'principal' | 'membre' }
   const [pinInput, setPinInput] = useState("");
   const [pinSetup, setPinSetup] = useState("");
   const [activeClient, setActiveClient] = useState(null);
@@ -119,7 +122,7 @@ export default function App() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [cat, cl, ord, set, comp, rm, ri] = await Promise.all([
+      const [cat, cl, ord, set, comp, rm, ri, au, al] = await Promise.all([
         sbSelect("catalog"),
         sbSelect("clients"),
         sbSelect("orders", "select=*&order=date.desc"),
@@ -127,6 +130,8 @@ export default function App() {
         sbSingleton("company"),
         sbSelect("raw_materials"),
         sbSelect("recipe_items"),
+        sbSelect("admin_users"),
+        sbSelect("activity_log", "select=*&order=created_at.desc&limit=200"),
       ]);
       setCatalog(cat || []);
       setClients(cl || []);
@@ -135,6 +140,8 @@ export default function App() {
       setCompany(comp || {});
       setRawMaterials(rm || []);
       setRecipeItems(ri || []);
+      setAdminUsers(au || []);
+      setActivityLog(al || []);
       setLoadError(false);
     } catch (e) {
       setLoadError(true);
@@ -194,8 +201,10 @@ export default function App() {
   };
   const deleteClient = async (id) => {
     try {
+      const c = clients.find((x) => x.id === id);
       await sbDelete("clients", id);
-      setClients((c) => c.filter((cl) => cl.id !== id));
+      setClients((cs) => cs.filter((cl) => cl.id !== id));
+      logActivity(`A supprimé le client "${c?.denomination || id}"`);
     } catch { flash("Échec de la suppression"); }
   };
 
@@ -212,6 +221,46 @@ export default function App() {
       flash("Échec de génération du numéro");
       return kind === "bl" ? `BL-${pad(Date.now() % 9999)}` : `FACT-${pad(Date.now() % 9999)}`;
     }
+  };
+
+  // ---- journal d'activité ----
+  const logActivity = async (action) => {
+    if (!currentAdmin) return;
+    try {
+      const row = await sbInsert("activity_log", { admin_name: currentAdmin.name, role: currentAdmin.role, action });
+      setActivityLog((a) => [row, ...a]);
+    } catch {}
+  };
+  const unseenLogins = activityLog.filter((a) => a.action === "Connexion" && !a.seen_by_principal).length;
+  const markActivitySeen = async () => {
+    const unseen = activityLog.filter((a) => !a.seen_by_principal);
+    setActivityLog((a) => a.map((x) => ({ ...x, seen_by_principal: true })));
+    for (const a of unseen) { try { await sbUpdate("activity_log", a.id, { seen_by_principal: true }); } catch {} }
+  };
+
+  // ---- membres admin (accès restreint) ----
+  const addAdminMember = async (member) => {
+    try {
+      const row = await sbInsert("admin_users", member);
+      setAdminUsers((m) => [...m, row]);
+      logActivity(`A créé le membre "${member.name}"`);
+      return row;
+    } catch { flash("Échec de l'enregistrement"); return null; }
+  };
+  const deleteAdminMember = async (id, name) => {
+    try {
+      await sbDelete("admin_users", id);
+      setAdminUsers((m) => m.filter((x) => x.id !== id));
+      logActivity(`A supprimé le membre "${name}"`);
+    } catch { flash("Échec de la suppression"); }
+  };
+  const changeAdminPin = async (newPin) => {
+    try {
+      const updated = await sbUpdateSingleton("settings", { admin_code: newPin });
+      setSettingsState(updated);
+      logActivity("A changé le code d'accès principal");
+      return true;
+    } catch { flash("Échec de la mise à jour"); return false; }
   };
 
   // ---- matières premières CRUD ----
@@ -327,11 +376,13 @@ export default function App() {
     try {
       await sbDelete("orders", id);
       setOrders((o) => o.filter((ord) => ord.id !== id));
+      logActivity("A supprimé une commande");
     } catch { flash("Échec de la suppression"); }
   };
   const generateFacture = async (order) => {
     const factureNumber = await nextDocNumber("facture");
     await updateOrder(order.id, { facture_number: factureNumber, facture_date: new Date().toISOString() });
+    logActivity(`A généré la facture ${factureNumber}`);
     flash(`Facture ${factureNumber} générée`);
   };
   const markAllSeen = async () => {
@@ -349,15 +400,36 @@ export default function App() {
     const updated = await sbUpdateSingleton("settings", { admin_code: pinSetup.trim() });
     setSettingsState(updated);
     setAdminUnlocked(true);
+    setCurrentAdmin({ name: "Admin principal", role: "principal" });
     setMode("admin");
     flash("Code pro créé");
   };
-  const tryAdminLogin = () => {
-    if (pinInput.trim() === settings.admin_code) {
+  const tryAdminLogin = async () => {
+    const code = pinInput.trim();
+    if (code === settings.admin_code) {
       setAdminUnlocked(true);
+      setCurrentAdmin({ name: "Admin principal", role: "principal" });
       setMode("admin");
       setPinInput("");
-    } else flash("Code incorrect");
+      try {
+        const row = await sbInsert("activity_log", { admin_name: "Admin principal", role: "principal", action: "Connexion" });
+        setActivityLog((a) => [row, ...a]);
+      } catch {}
+      return;
+    }
+    const member = adminUsers.find((m) => m.code === code);
+    if (member) {
+      setAdminUnlocked(true);
+      setCurrentAdmin({ name: member.name, role: "membre" });
+      setMode("admin");
+      setPinInput("");
+      try {
+        const row = await sbInsert("activity_log", { admin_name: member.name, role: "membre", action: "Connexion" });
+        setActivityLog((a) => [row, ...a]);
+      } catch {}
+      return;
+    }
+    flash("Code incorrect");
   };
   const tryClientLogin = () => {
     const code = clientCodeInput.trim().toUpperCase();
@@ -372,6 +444,7 @@ export default function App() {
   const logout = () => {
     setMode("client-login");
     setAdminUnlocked(false);
+    setCurrentAdmin(null);
     setActiveClient(null);
   };
 
@@ -425,12 +498,15 @@ export default function App() {
       {mode === "admin" && adminUnlocked && (
         <AdminApp
           company={COMPANY}
+          currentAdmin={currentAdmin}
           catalog={catalog} addCatalogItem={addCatalogItem} updateCatalogItem={updateCatalogItem} deleteCatalogItem={deleteCatalogItem}
           orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture}
           clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient}
           rawMaterials={rawMaterials} addRawMaterial={addRawMaterial} updateRawMaterial={updateRawMaterial}
           deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
           recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock}
+          adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember}
+          changeAdminPin={changeAdminPin} activityLog={activityLog} unseenLogins={unseenLogins} markActivitySeen={markActivitySeen}
           unseenCount={unseenCount} markAllSeen={markAllSeen}
           onLogout={logout} flash={flash}
         />
@@ -496,8 +572,9 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
 }
 
 // ==================== ADMIN APP ====================
-function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, onLogout, flash }) {
+function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, onLogout, flash }) {
   const [tab, setTab] = useState("commandes");
+  const isPrincipal = currentAdmin?.role === "principal";
 
   return (
     <div style={styles.shell}>
@@ -506,7 +583,7 @@ function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteC
           <img src={company.logo} alt="" style={styles.logoImgSmall} />
           <div>
             <div style={styles.brand}>Espace pro</div>
-            <div style={styles.brandSub}>Tout gérer, tout contrôler</div>
+            <div style={styles.brandSub}>{currentAdmin?.name} {!isPrincipal && "· accès restreint"}</div>
           </div>
         </div>
         <button onClick={onLogout} style={styles.logoutBtn}><LogOut size={15} /></button>
@@ -518,8 +595,9 @@ function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteC
           { k: "stock", label: "Stock", icon: Boxes },
           { k: "clients", label: "Clients", icon: Users },
           { k: "societe", label: "Société", icon: ShieldCheck },
+          ...(isPrincipal ? [{ k: "membres", label: "Membres", icon: UserCog, badge: unseenLogins }] : []),
         ].map((t) => (
-          <button key={t.k} onClick={() => { setTab(t.k); if (t.k === "commandes") markAllSeen(); }}
+          <button key={t.k} onClick={() => { setTab(t.k); if (t.k === "commandes") markAllSeen(); if (t.k === "membres") markActivitySeen(); }}
             style={{ ...styles.navBtn, ...(tab === t.k ? styles.navBtnActive : {}) }}>
             <t.icon size={14} />{t.label}
             {!!t.badge && <span style={styles.navBadge}>{t.badge}</span>}
@@ -536,8 +614,11 @@ function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteC
             recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock} flash={flash}
           />
         )}
-        {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} flash={flash} />}
-        {tab === "societe" && <SocieteAdmin company={company} />}
+        {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} flash={flash} canDelete={isPrincipal} />}
+        {tab === "societe" && <SocieteAdmin company={company} isPrincipal={isPrincipal} settingsAccess={isPrincipal} changeAdminPin={changeAdminPin} flash={flash} />}
+        {tab === "membres" && isPrincipal && (
+          <MembresAdmin adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember} activityLog={activityLog} flash={flash} />
+        )}
       </main>
     </div>
   );
@@ -672,7 +753,7 @@ function CatalogueAdmin({ catalog, addCatalogItem, updateCatalogItem, deleteCata
   );
 }
 
-function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, catalog, flash }) {
+function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, catalog, flash, canDelete }) {
   const [form, setForm] = useState({ denomination: "", ice: "", address: "", phone: "" });
   const [pricingId, setPricingId] = useState(null);
   const [priceDraft, setPriceDraft] = useState({});
@@ -752,7 +833,7 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
               <button onClick={() => startEdit(c)} style={styles.iconBtnGhost}><Pencil size={13} /></button>
               <button onClick={() => openPricing(c)} style={styles.tarifBtn}>Tarifs</button>
               <button onClick={() => copyCode(c.code)} style={styles.codeChip}><Copy size={11} /> {c.code}</button>
-              <button onClick={() => deleteClient(c.id)} style={styles.iconBtnGhost}><Trash2 size={14} /></button>
+              {canDelete && <button onClick={() => deleteClient(c.id)} style={styles.iconBtnGhost}><Trash2 size={14} /></button>}
             </div>
           );
         })}
@@ -1025,20 +1106,91 @@ function RecipesAdmin({ catalog, rawMaterials, recipeItems, setRecipeForCatalogI
   );
 }
 
-function SocieteAdmin({ company }) {
+function SocieteAdmin({ company, isPrincipal, changeAdminPin, flash }) {
   const rows = [
     ["Dénomination", company.name], ["ICE", company.ice], ["Registre de commerce", company.rc],
     ["Adresse", company.address], ["Téléphone", company.phone], ["Email", company.email],
   ];
+  const [currentPin, setCurrentPin] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+
+  const submitChangePin = async () => {
+    if (newPin.trim().length < 4) return flash("4 caractères minimum");
+    if (newPin !== confirmPin) return flash("Les deux codes ne correspondent pas");
+    const ok = await changeAdminPin(newPin.trim());
+    if (ok) { flash("Code d'accès mis à jour"); setCurrentPin(""); setNewPin(""); setConfirmPin(""); }
+  };
+
   return (
-    <div style={styles.societeBox}>
-      <img src={company.logo} alt={company.name} style={styles.logoImgLarge} />
-      <div style={styles.societeTable}>
-        {rows.map(([label, val]) => (
-          <div key={label} style={styles.societeRow}><span style={styles.societeLabel}>{label}</span><span style={styles.societeVal}>{val || "—"}</span></div>
+    <div>
+      <div style={styles.societeBox}>
+        <img src={company.logo} alt={company.name} style={styles.logoImgLarge} />
+        <div style={styles.societeTable}>
+          {rows.map(([label, val]) => (
+            <div key={label} style={styles.societeRow}><span style={styles.societeLabel}>{label}</span><span style={styles.societeVal}>{val || "—"}</span></div>
+          ))}
+        </div>
+        <div style={styles.societeNote}>Ces informations apparaissent en en-tête sur tes bons de livraison et factures.</div>
+      </div>
+
+      {isPrincipal && (
+        <div style={{ ...styles.societeBox, marginTop: 18 }}>
+          <div style={styles.catLabel}><KeyRound size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />Changer mon code d'accès</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12 }}>
+            <input type="password" placeholder="Nouveau code (4 caractères min.)" value={newPin} onChange={(e) => setNewPin(e.target.value)} style={styles.addInput} />
+            <input type="password" placeholder="Confirmer le nouveau code" value={confirmPin} onChange={(e) => setConfirmPin(e.target.value)} style={styles.addInput} />
+            <button onClick={submitChangePin} style={styles.primaryBtn}>Mettre à jour mon code</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MembresAdmin({ adminUsers, addAdminMember, deleteAdminMember, activityLog, flash }) {
+  const [name, setName] = useState("");
+
+  const handleAdd = async () => {
+    if (!name.trim()) return flash("Nom requis");
+    const row = await addAdminMember({ name: name.trim(), code: genCode() });
+    setName("");
+    if (row) flash(`Code créé pour ${row.name} : ${row.code}`);
+  };
+  const copyCode = (code) => { try { navigator.clipboard.writeText(code); flash("Code copié"); } catch { flash(code); } };
+
+  return (
+    <div>
+      <div style={styles.catLabel}>Membres (accès restreint)</div>
+      <div style={styles.addItemRow}>
+        <input placeholder="Nom du membre" value={name} onChange={(e) => setName(e.target.value)} style={styles.addInput} />
+        <button onClick={handleAdd} style={styles.addBtn}><Plus size={16} /> Créer un accès</button>
+      </div>
+      <div style={styles.catalogueTable}>
+        {adminUsers.length === 0 && <div style={styles.emptyState}>Aucun membre créé. Un membre a un accès restreint : il ne peut pas supprimer de client ni modifier les infos société.</div>}
+        {adminUsers.map((m) => (
+          <div key={m.id} style={styles.clientRow}>
+            <div style={{ flex: 1 }}><div style={styles.catalogueRowName}>{m.name}</div></div>
+            <button onClick={() => copyCode(m.code)} style={styles.codeChip}><Copy size={11} /> {m.code}</button>
+            <button onClick={() => deleteAdminMember(m.id, m.name)} style={styles.iconBtnGhost}><Trash2 size={14} /></button>
+          </div>
         ))}
       </div>
-      <div style={styles.societeNote}>Ces informations apparaissent en en-tête sur tes bons de livraison et factures.</div>
+
+      <div style={{ ...styles.catLabel, marginTop: 26 }}>Historique des connexions et actions</div>
+      <div style={styles.catalogueTable}>
+        {activityLog.length === 0 && <div style={styles.emptyState}>Aucune activité enregistrée pour le moment.</div>}
+        {activityLog.slice(0, 60).map((a) => (
+          <div key={a.id} style={styles.activityRow}>
+            <span style={{ ...styles.activityRoleDot, background: a.role === "principal" ? C.gold : "#6FA383" }} />
+            <div style={{ flex: 1 }}>
+              <span style={styles.catalogueRowName}>{a.admin_name}</span>
+              <span style={styles.orderMeta}> — {a.action}</span>
+            </div>
+            <span style={styles.orderMeta}>{new Date(a.created_at).toLocaleString("fr-FR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1429,6 +1581,8 @@ const styles = {
   catalogueTable: { display: "flex", flexDirection: "column", gap: 6 },
   catalogueRow: { display: "flex", alignItems: "center", gap: 10, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px" },
   clientRow: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px" },
+  activityRow: { display: "flex", alignItems: "center", gap: 10, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 9, padding: "9px 12px" },
+  activityRoleDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
   clientEditBox: { display: "flex", flexDirection: "column", gap: 8, background: C.surfaceAlt, border: `1px solid ${C.gold}`, borderRadius: 10, padding: 12 },
   catalogueRowName: { flex: 2, fontSize: 13.5, fontWeight: 600, color: C.text },
   catalogueRowCat: { flex: 1, fontSize: 12, color: C.textMuted },
