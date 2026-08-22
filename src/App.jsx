@@ -49,6 +49,29 @@ const STATUS = {
   livree: { label: "Livrée", color: "#8B93A0", bg: "rgba(139,147,160,0.12)" },
 };
 
+// Compresse et redimensionne une image avant sauvegarde (reste léger en base de données)
+function fileToCompressedImage(file, maxDim = 400, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) { height = Math.round((height * maxDim) / width); width = maxDim; }
+        else if (height > maxDim) { width = Math.round((width * maxDim) / height); height = maxDim; }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 const genCode = () => {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let c = "";
@@ -482,34 +505,55 @@ function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFactur
 }
 
 function CatalogueAdmin({ catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, flash }) {
-  const [newItem, setNewItem] = useState({ name: "", price: "", category: "" });
+  const [newItem, setNewItem] = useState({ name: "", price: "", category: "", image_url: "" });
   const [editingId, setEditingId] = useState(null);
   const [editDraft, setEditDraft] = useState({});
+  const [uploading, setUploading] = useState(false);
+
+  const handleImageChange = async (e, target) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const dataUrl = await fileToCompressedImage(file);
+      if (target === "new") setNewItem((n) => ({ ...n, image_url: dataUrl }));
+      else setEditDraft((d) => ({ ...d, image_url: dataUrl }));
+    } catch { flash("Échec du traitement de l'image"); }
+    setUploading(false);
+  };
 
   const addItem = () => {
     if (!newItem.name.trim() || !newItem.price) return flash("Nom et prix requis");
-    addCatalogItem({ name: newItem.name.trim(), price: parseFloat(newItem.price), category: newItem.category.trim() || "Autre" });
-    setNewItem({ name: "", price: "", category: "" });
+    addCatalogItem({ name: newItem.name.trim(), price: parseFloat(newItem.price), category: newItem.category.trim() || "Autre", image_url: newItem.image_url || null });
+    setNewItem({ name: "", price: "", category: "", image_url: "" });
   };
   const startEdit = (item) => { setEditingId(item.id); setEditDraft(item); };
   const saveEdit = () => {
-    updateCatalogItem(editingId, { name: editDraft.name, category: editDraft.category, price: parseFloat(editDraft.price) });
+    updateCatalogItem(editingId, { name: editDraft.name, category: editDraft.category, price: parseFloat(editDraft.price), image_url: editDraft.image_url || null });
     setEditingId(null);
   };
 
   return (
     <div>
       <div style={styles.addItemRow}>
+        <label style={styles.imageUploadBtn}>
+          {newItem.image_url ? <img src={newItem.image_url} alt="" style={styles.imageThumb} /> : <span style={{ fontSize: 11 }}>Photo</span>}
+          <input type="file" accept="image/*" onChange={(e) => handleImageChange(e, "new")} style={{ display: "none" }} />
+        </label>
         <input placeholder="Nom du plat" value={newItem.name} onChange={(e) => setNewItem({ ...newItem, name: e.target.value })} style={styles.addInput} />
         <input placeholder="Catégorie" value={newItem.category} onChange={(e) => setNewItem({ ...newItem, category: e.target.value })} style={{ ...styles.addInput, maxWidth: 130 }} />
         <input placeholder="Prix DH" type="number" step="0.01" value={newItem.price} onChange={(e) => setNewItem({ ...newItem, price: e.target.value })} style={{ ...styles.addInput, maxWidth: 90 }} />
-        <button onClick={addItem} style={styles.addBtn}><Plus size={16} /> Ajouter</button>
+        <button onClick={addItem} style={styles.addBtn} disabled={uploading}><Plus size={16} /> Ajouter</button>
       </div>
       <div style={styles.catalogueTable}>
         {catalog.length === 0 && <div style={styles.emptyState}>Ton menu est vide.</div>}
         {catalog.map((item) =>
           editingId === item.id ? (
             <div key={item.id} style={styles.catalogueRow}>
+              <label style={styles.imageUploadBtn}>
+                {editDraft.image_url ? <img src={editDraft.image_url} alt="" style={styles.imageThumb} /> : <span style={{ fontSize: 10 }}>Photo</span>}
+                <input type="file" accept="image/*" onChange={(e) => handleImageChange(e, "edit")} style={{ display: "none" }} />
+              </label>
               <input value={editDraft.name} onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })} style={{ ...styles.addInput, flex: 2 }} />
               <input value={editDraft.category} onChange={(e) => setEditDraft({ ...editDraft, category: e.target.value })} style={{ ...styles.addInput, flex: 1 }} />
               <input type="number" step="0.01" value={editDraft.price} onChange={(e) => setEditDraft({ ...editDraft, price: e.target.value })} style={{ ...styles.addInput, width: 70 }} />
@@ -517,6 +561,7 @@ function CatalogueAdmin({ catalog, addCatalogItem, updateCatalogItem, deleteCata
             </div>
           ) : (
             <div key={item.id} style={styles.catalogueRow}>
+              {item.image_url ? <img src={item.image_url} alt="" style={styles.imageThumb} /> : <div style={styles.imageThumbEmpty} />}
               <span style={styles.catalogueRowName}>{item.name}</span>
               <span style={styles.catalogueRowCat}>{item.category}</span>
               <span style={styles.catalogueRowPrice}>{Number(item.price).toFixed(2)} DH</span>
@@ -784,9 +829,21 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
     }
   };
 
+  const [logoUploading, setLogoUploading] = useState(false);
   const saveProfile = async () => {
     await onUpdateClient({ address: profileDraft.address.trim(), phone: profileDraft.phone.trim() });
     flash("Coordonnées mises à jour");
+  };
+  const handleLogoChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLogoUploading(true);
+    try {
+      const dataUrl = await fileToCompressedImage(file, 300, 0.75);
+      await onUpdateClient({ logo_url: dataUrl });
+      flash("Logo mis à jour");
+    } catch { flash("Échec de l'envoi du logo"); }
+    setLogoUploading(false);
   };
 
   const filtered = catalog.filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
@@ -796,7 +853,7 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
     <div style={styles.shell}>
       <header style={styles.header}>
         <div style={styles.headerLeft}>
-          <img src={company.logo} alt="" style={styles.logoImgSmall} />
+          <img src={client.logo_url || company.logo} alt="" style={styles.logoImgSmall} />
           <div>
             <div style={styles.brand}>{client.denomination}</div>
             <div style={styles.brandSub}>Espace client</div>
@@ -827,6 +884,7 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
                   <div style={styles.itemGrid}>
                     {filtered.filter((c) => c.category === cat).map((item) => (
                       <button key={item.id} onClick={() => addLine(item)} style={styles.itemCard}>
+                        {item.image_url && <img src={item.image_url} alt="" style={styles.itemCardImage} />}
                         <span style={styles.itemName}>{item.name}</span>
                         <span style={styles.itemPrice}>{effectivePrice(item, client).toFixed(2)} DH</span>
                       </button>
@@ -905,6 +963,15 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
               <div style={styles.societeRow}><span style={styles.societeLabel}>ICE</span><span style={styles.societeVal}>{client.ice || "Non renseigné"}</span></div>
             </div>
             <div style={styles.societeNote}>Ces informations sont gérées par ton traiteur. Tu peux compléter tes coordonnées ci-dessous.</div>
+
+            <div style={styles.logoUploadRow}>
+              <label style={styles.logoUploadBtn}>
+                {client.logo_url ? <img src={client.logo_url} alt="" style={styles.logoUploadPreview} /> : <span style={{ fontSize: 11, color: C.textMuted }}>Ajouter mon logo</span>}
+                <input type="file" accept="image/*" onChange={handleLogoChange} style={{ display: "none" }} />
+              </label>
+              <div style={styles.orderMeta}>{logoUploading ? "Envoi en cours…" : "Clique sur le cadre pour ajouter ou changer ton logo."}</div>
+            </div>
+
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 16 }}>
               <input placeholder="Adresse" value={profileDraft.address} onChange={(e) => setProfileDraft({ ...profileDraft, address: e.target.value })} style={styles.addInput} />
               <input placeholder="Téléphone" value={profileDraft.phone} onChange={(e) => setProfileDraft({ ...profileDraft, phone: e.target.value })} style={styles.addInput} />
@@ -966,6 +1033,7 @@ const styles = {
   itemGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8 },
   itemCard: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "13px 13px", textAlign: "left", cursor: "pointer", display: "flex", flexDirection: "column", gap: 5 },
   itemName: { fontSize: 13.5, fontWeight: 600, lineHeight: 1.3, color: C.text },
+  itemCardImage: { width: "100%", height: 84, objectFit: "cover", borderRadius: 7, marginBottom: 2 },
   itemPrice: { fontFamily: "'Space Mono', monospace", fontSize: 13, color: C.gold },
 
   cartBox: { background: C.surface, border: `1px solid ${C.border}`, width: "100%", maxWidth: 420, borderRadius: 14, padding: "22px 20px 20px", boxShadow: "0 12px 34px rgba(0,0,0,0.35)" },
@@ -1009,6 +1077,12 @@ const styles = {
   addItemRow: { display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" },
   clientFormGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, marginBottom: 20 },
   addInput: { flex: 1, minWidth: 100, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 11px", fontSize: 13.5, outline: "none", background: C.surface, color: C.text },
+  imageUploadBtn: { width: 44, height: 44, minWidth: 44, borderRadius: 8, border: `1px dashed ${C.border}`, background: C.surface, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", overflow: "hidden", color: C.textMuted, textAlign: "center" },
+  imageThumb: { width: 44, height: 44, objectFit: "cover", borderRadius: 7 },
+  imageThumbEmpty: { width: 32, height: 32, borderRadius: 6, background: C.surfaceAlt, border: `1px dashed ${C.border}` },
+  logoUploadRow: { display: "flex", alignItems: "center", gap: 14, marginTop: 16 },
+  logoUploadBtn: { width: 72, height: 72, borderRadius: 12, border: `1px dashed ${C.border}`, background: C.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", overflow: "hidden", textAlign: "center", padding: 4 },
+  logoUploadPreview: { width: "100%", height: "100%", objectFit: "contain" },
   addBtn: { background: C.gold, color: "#1A1508", border: "none", borderRadius: 8, padding: "10px 14px", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer" },
   catalogueTable: { display: "flex", flexDirection: "column", gap: 6 },
   catalogueRow: { display: "flex", alignItems: "center", gap: 10, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px" },
