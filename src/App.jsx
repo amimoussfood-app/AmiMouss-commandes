@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, Minus, Trash2, X, Check, Clock, Search, Users, ClipboardList,
   Settings, LogOut, Copy, Pencil, ShieldCheck, ArrowLeft, FileText,
-  Printer, Truck, Receipt, User
+  Printer, Truck, Receipt, User, Boxes, PackagePlus, AlertTriangle
 } from "lucide-react";
 
 // ==================== SUPABASE ====================
@@ -98,6 +98,8 @@ export default function App() {
   const [catalog, setCatalog] = useState([]);
   const [orders, setOrders] = useState([]);
   const [clients, setClients] = useState([]);
+  const [rawMaterials, setRawMaterials] = useState([]);
+  const [recipeItems, setRecipeItems] = useState([]);
   const [settings, setSettingsState] = useState({ id: 1, admin_code: null, next_bl: 1, next_facture: 1 });
   const [company, setCompany] = useState({ name: "", ice: "", rc: "", address: "", phone: "", email: "" });
   const [toast, setToast] = useState("");
@@ -117,18 +119,22 @@ export default function App() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [cat, cl, ord, set, comp] = await Promise.all([
+      const [cat, cl, ord, set, comp, rm, ri] = await Promise.all([
         sbSelect("catalog"),
         sbSelect("clients"),
         sbSelect("orders", "select=*&order=date.desc"),
         sbSingleton("settings"),
         sbSingleton("company"),
+        sbSelect("raw_materials"),
+        sbSelect("recipe_items"),
       ]);
       setCatalog(cat || []);
       setClients(cl || []);
       setOrders((ord || []).map(mapOrder));
       setSettingsState(set || { id: 1, admin_code: null, next_bl: 1, next_facture: 1 });
       setCompany(comp || {});
+      setRawMaterials(rm || []);
+      setRecipeItems(ri || []);
       setLoadError(false);
     } catch (e) {
       setLoadError(true);
@@ -208,7 +214,64 @@ export default function App() {
     }
   };
 
-  // ---- orders CRUD ----
+  // ---- matières premières CRUD ----
+  const addRawMaterial = async (item) => {
+    try {
+      const row = await sbInsert("raw_materials", item);
+      setRawMaterials((r) => [...r, row]);
+    } catch { flash("Échec de l'enregistrement"); }
+  };
+  const updateRawMaterial = async (id, patch) => {
+    try {
+      const row = await sbUpdate("raw_materials", id, patch);
+      setRawMaterials((r) => r.map((i) => (i.id === id ? row : i)));
+    } catch { flash("Échec de la mise à jour"); }
+  };
+  const deleteRawMaterial = async (id) => {
+    try {
+      await sbDelete("raw_materials", id);
+      setRawMaterials((r) => r.filter((i) => i.id !== id));
+    } catch { flash("Échec de la suppression (vérifie qu'elle n'est pas utilisée dans une recette)"); }
+  };
+  const restockRawMaterial = async (item, addQty) => {
+    const newQty = Number(item.stock_quantity) + Number(addQty);
+    await updateRawMaterial(item.id, { stock_quantity: newQty });
+  };
+
+  // ---- recettes CRUD ----
+  const setRecipeForCatalogItem = async (catalogId, items) => {
+    // items: [{raw_material_id, quantity}]
+    try {
+      const existing = recipeItems.filter((r) => r.catalog_id === catalogId);
+      for (const ex of existing) await sbDelete("recipe_items", ex.id);
+      const inserted = [];
+      for (const it of items) {
+        if (!it.raw_material_id || !it.quantity) continue;
+        const row = await sbInsert("recipe_items", { catalog_id: catalogId, raw_material_id: it.raw_material_id, quantity: parseFloat(it.quantity) });
+        inserted.push(row);
+      }
+      setRecipeItems((r) => [...r.filter((x) => x.catalog_id !== catalogId), ...inserted]);
+      flash("Recette enregistrée");
+    } catch { flash("Échec de l'enregistrement de la recette"); }
+  };
+
+  // ---- production (ajout de stock produit fini + consommation des matières) ----
+  const produceStock = async (catalogItem, qty) => {
+    try {
+      const items = recipeItems.filter((r) => r.catalog_id === catalogItem.id);
+      for (const ri of items) {
+        const rm = rawMaterials.find((m) => m.id === ri.raw_material_id);
+        if (!rm) continue;
+        const newQty = Number(rm.stock_quantity) - Number(ri.quantity) * qty;
+        await updateRawMaterial(rm.id, { stock_quantity: newQty });
+      }
+      const newStock = Number(catalogItem.stock_quantity || 0) + Number(qty);
+      await updateCatalogItem(catalogItem.id, { stock_quantity: newStock });
+      flash(`${qty} unité(s) de ${catalogItem.name} ajoutée(s) au stock`);
+    } catch { flash("Échec de la production"); }
+  };
+
+
   const addOrder = async (order) => {
     try {
       const blNumber = await nextDocNumber("bl");
@@ -228,6 +291,29 @@ export default function App() {
       };
       const inserted = await sbInsert("orders", row);
       setOrders((o) => [mapOrder(inserted), ...o]);
+
+      // Déduction automatique du stock (matières premières + produits finis)
+      for (const line of order.items) {
+        const catItem = catalog.find((c) => c.id === line.id);
+        if (catItem) {
+          const newFinished = Number(catItem.stock_quantity || 0) - Number(line.qty);
+          try {
+            const patched = await sbUpdate("catalog", catItem.id, { stock_quantity: newFinished });
+            setCatalog((c) => c.map((i) => (i.id === catItem.id ? patched : i)));
+          } catch {}
+        }
+        const linkedRecipe = recipeItems.filter((r) => r.catalog_id === line.id);
+        for (const ri of linkedRecipe) {
+          const rm = rawMaterials.find((m) => m.id === ri.raw_material_id);
+          if (!rm) continue;
+          const newQty = Number(rm.stock_quantity) - Number(ri.quantity) * Number(line.qty);
+          try {
+            const patched = await sbUpdate("raw_materials", rm.id, { stock_quantity: newQty });
+            setRawMaterials((rows) => rows.map((x) => (x.id === rm.id ? patched : x)));
+          } catch {}
+        }
+      }
+
       return true;
     } catch { flash("Échec de l'envoi de la commande"); return false; }
   };
@@ -342,6 +428,9 @@ export default function App() {
           catalog={catalog} addCatalogItem={addCatalogItem} updateCatalogItem={updateCatalogItem} deleteCatalogItem={deleteCatalogItem}
           orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture}
           clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient}
+          rawMaterials={rawMaterials} addRawMaterial={addRawMaterial} updateRawMaterial={updateRawMaterial}
+          deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
+          recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock}
           unseenCount={unseenCount} markAllSeen={markAllSeen}
           onLogout={logout} flash={flash}
         />
@@ -407,7 +496,7 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
 }
 
 // ==================== ADMIN APP ====================
-function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, onLogout, flash }) {
+function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, onLogout, flash }) {
   const [tab, setTab] = useState("commandes");
 
   return (
@@ -426,6 +515,7 @@ function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteC
         {[
           { k: "commandes", label: "Commandes", icon: ClipboardList, badge: unseenCount },
           { k: "catalogue", label: "Catalogue", icon: Settings },
+          { k: "stock", label: "Stock", icon: Boxes },
           { k: "clients", label: "Clients", icon: Users },
           { k: "societe", label: "Société", icon: ShieldCheck },
         ].map((t) => (
@@ -439,6 +529,13 @@ function AdminApp({ company, catalog, addCatalogItem, updateCatalogItem, deleteC
       <main style={styles.main}>
         {tab === "commandes" && <OrdersAdmin company={company} orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture} clients={clients} flash={flash} />}
         {tab === "catalogue" && <CatalogueAdmin catalog={catalog} addCatalogItem={addCatalogItem} updateCatalogItem={updateCatalogItem} deleteCatalogItem={deleteCatalogItem} flash={flash} />}
+        {tab === "stock" && (
+          <StockAdmin
+            catalog={catalog} rawMaterials={rawMaterials} addRawMaterial={addRawMaterial}
+            updateRawMaterial={updateRawMaterial} deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
+            recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock} flash={flash}
+          />
+        )}
         {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} flash={flash} />}
         {tab === "societe" && <SocieteAdmin company={company} />}
       </main>
@@ -684,6 +781,243 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
               {catalog.length === 0 && <div style={styles.emptyState}>Ajoute d'abord des articles au catalogue.</div>}
             </div>
             <button onClick={savePricing} style={styles.primaryBtn}>Enregistrer les tarifs</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StockAdmin({ catalog, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, flash }) {
+  const [sub, setSub] = useState("vue");
+
+  const costOf = (catalogId) => {
+    const items = recipeItems.filter((r) => r.catalog_id === catalogId);
+    return items.reduce((sum, ri) => {
+      const rm = rawMaterials.find((m) => m.id === ri.raw_material_id);
+      return sum + (rm ? Number(rm.cost_per_unit) * Number(ri.quantity) : 0);
+    }, 0);
+  };
+
+  return (
+    <div>
+      <div style={styles.subNavRow}>
+        {[
+          { k: "vue", label: "Vue d'ensemble" },
+          { k: "matieres", label: "Matières premières" },
+          { k: "recettes", label: "Recettes & coûts" },
+        ].map((s) => (
+          <button key={s.k} onClick={() => setSub(s.k)} style={{ ...styles.subNavBtn, ...(sub === s.k ? styles.subNavBtnActive : {}) }}>{s.label}</button>
+        ))}
+      </div>
+
+      {sub === "vue" && <StockOverview catalog={catalog} rawMaterials={rawMaterials} costOf={costOf} produceStock={produceStock} />}
+      {sub === "matieres" && <RawMaterialsAdmin rawMaterials={rawMaterials} addRawMaterial={addRawMaterial} updateRawMaterial={updateRawMaterial} deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial} flash={flash} />}
+      {sub === "recettes" && <RecipesAdmin catalog={catalog} rawMaterials={rawMaterials} recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} costOf={costOf} flash={flash} />}
+    </div>
+  );
+}
+
+function StockOverview({ catalog, rawMaterials, costOf, produceStock }) {
+  const [prodQty, setProdQty] = useState({});
+  const lowStock = rawMaterials.filter((m) => Number(m.stock_quantity) <= Number(m.alert_threshold || 0));
+
+  return (
+    <div>
+      {lowStock.length > 0 && (
+        <div style={styles.alertBox}>
+          <AlertTriangle size={15} />
+          <span>{lowStock.length} matière{lowStock.length > 1 ? "s" : ""} première{lowStock.length > 1 ? "s" : ""} en stock bas : {lowStock.map((m) => m.name).join(", ")}</span>
+        </div>
+      )}
+
+      <div style={styles.catLabel}>Stock produits finis</div>
+      <div style={styles.catalogueTable}>
+        {catalog.length === 0 && <div style={styles.emptyState}>Ajoute d'abord des produits au catalogue.</div>}
+        {catalog.map((item) => {
+          const cost = costOf(item.id);
+          const price = Number(item.price);
+          const margin = price - cost;
+          return (
+            <div key={item.id} style={styles.stockRow}>
+              <div style={{ flex: 2, minWidth: 140 }}>
+                <div style={styles.catalogueRowName}>{item.name}</div>
+                <div style={styles.orderMeta}>
+                  Coût {cost.toFixed(2)} DH · Prix {price.toFixed(2)} DH · Marge {margin.toFixed(2)} DH
+                </div>
+              </div>
+              <div style={styles.stockQtyBadge}>{Number(item.stock_quantity || 0)} en stock</div>
+              <input type="number" placeholder="Qté produite" value={prodQty[item.id] || ""} onChange={(e) => setProdQty({ ...prodQty, [item.id]: e.target.value })} style={{ ...styles.addInput, width: 90, flex: "0 0 90px" }} />
+              <button onClick={() => { const q = parseFloat(prodQty[item.id]); if (q > 0) { produceStock(item, q); setProdQty({ ...prodQty, [item.id]: "" }); } }} style={styles.addBtn}>
+                <PackagePlus size={15} /> Produire
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ ...styles.catLabel, marginTop: 26 }}>Stock matières premières</div>
+      <div style={styles.catalogueTable}>
+        {rawMaterials.length === 0 && <div style={styles.emptyState}>Ajoute tes matières premières dans l'onglet dédié.</div>}
+        {rawMaterials.map((m) => {
+          const low = Number(m.stock_quantity) <= Number(m.alert_threshold || 0);
+          return (
+            <div key={m.id} style={styles.stockRow}>
+              <div style={{ flex: 1 }}>
+                <div style={styles.catalogueRowName}>{m.name}</div>
+                <div style={styles.orderMeta}>{Number(m.cost_per_unit).toFixed(2)} DH / {m.unit}</div>
+              </div>
+              <div style={{ ...styles.stockQtyBadge, ...(low ? styles.stockQtyBadgeLow : {}) }}>
+                {Number(m.stock_quantity)} {m.unit}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RawMaterialsAdmin({ rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, flash }) {
+  const [form, setForm] = useState({ name: "", unit: "kg", cost_per_unit: "", stock_quantity: "", alert_threshold: "" });
+  const [restockDraft, setRestockDraft] = useState({});
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState({});
+
+  const addItem = () => {
+    if (!form.name.trim() || !form.cost_per_unit) return flash("Nom et coût unitaire requis");
+    addRawMaterial({
+      name: form.name.trim(), unit: form.unit.trim() || "unité",
+      cost_per_unit: parseFloat(form.cost_per_unit),
+      stock_quantity: parseFloat(form.stock_quantity) || 0,
+      alert_threshold: parseFloat(form.alert_threshold) || 0,
+    });
+    setForm({ name: "", unit: "kg", cost_per_unit: "", stock_quantity: "", alert_threshold: "" });
+  };
+  const startEdit = (m) => { setEditingId(m.id); setEditDraft(m); };
+  const saveEdit = () => {
+    updateRawMaterial(editingId, {
+      name: editDraft.name, unit: editDraft.unit,
+      cost_per_unit: parseFloat(editDraft.cost_per_unit),
+      alert_threshold: parseFloat(editDraft.alert_threshold) || 0,
+    });
+    setEditingId(null);
+  };
+  const doRestock = (m) => {
+    const qty = parseFloat(restockDraft[m.id]);
+    if (!qty) return;
+    restockRawMaterial(m, qty);
+    setRestockDraft({ ...restockDraft, [m.id]: "" });
+  };
+
+  return (
+    <div>
+      <div style={styles.clientFormGrid}>
+        <input placeholder="Nom (ex: Mascarpone)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={styles.addInput} />
+        <input placeholder="Unité (kg, l, pièce…)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} style={styles.addInput} />
+        <input placeholder="Coût / unité (DH)" type="number" step="0.01" value={form.cost_per_unit} onChange={(e) => setForm({ ...form, cost_per_unit: e.target.value })} style={styles.addInput} />
+        <input placeholder="Stock initial" type="number" step="0.01" value={form.stock_quantity} onChange={(e) => setForm({ ...form, stock_quantity: e.target.value })} style={styles.addInput} />
+        <input placeholder="Seuil d'alerte" type="number" step="0.01" value={form.alert_threshold} onChange={(e) => setForm({ ...form, alert_threshold: e.target.value })} style={styles.addInput} />
+        <button onClick={addItem} style={styles.addBtn}><Plus size={16} /> Ajouter</button>
+      </div>
+
+      <div style={styles.catalogueTable}>
+        {rawMaterials.length === 0 && <div style={styles.emptyState}>Aucune matière première enregistrée.</div>}
+        {rawMaterials.map((m) => {
+          if (editingId === m.id) {
+            return (
+              <div key={m.id} style={styles.clientEditBox}>
+                <input value={editDraft.name} onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })} style={styles.addInput} placeholder="Nom" />
+                <input value={editDraft.unit} onChange={(e) => setEditDraft({ ...editDraft, unit: e.target.value })} style={styles.addInput} placeholder="Unité" />
+                <input type="number" step="0.01" value={editDraft.cost_per_unit} onChange={(e) => setEditDraft({ ...editDraft, cost_per_unit: e.target.value })} style={styles.addInput} placeholder="Coût/unité" />
+                <input type="number" step="0.01" value={editDraft.alert_threshold || ""} onChange={(e) => setEditDraft({ ...editDraft, alert_threshold: e.target.value })} style={styles.addInput} placeholder="Seuil d'alerte" />
+                <button onClick={saveEdit} style={styles.primaryBtnSmall}>Enregistrer</button>
+              </div>
+            );
+          }
+          const low = Number(m.stock_quantity) <= Number(m.alert_threshold || 0);
+          return (
+            <div key={m.id} style={styles.clientRow}>
+              <div style={{ flex: 1, minWidth: 140 }}>
+                <div style={styles.catalogueRowName}>{m.name}</div>
+                <div style={styles.orderMeta}>{Number(m.cost_per_unit).toFixed(2)} DH / {m.unit}</div>
+              </div>
+              <div style={{ ...styles.stockQtyBadge, ...(low ? styles.stockQtyBadgeLow : {}) }}>{Number(m.stock_quantity)} {m.unit}</div>
+              <input type="number" placeholder="+ Qté" value={restockDraft[m.id] || ""} onChange={(e) => setRestockDraft({ ...restockDraft, [m.id]: e.target.value })} style={{ ...styles.addInput, width: 70, flex: "0 0 70px" }} />
+              <button onClick={() => doRestock(m)} style={styles.tarifBtn}>Réappro.</button>
+              <button onClick={() => startEdit(m)} style={styles.iconBtnGhost}><Pencil size={13} /></button>
+              <button onClick={() => deleteRawMaterial(m.id)} style={styles.iconBtnGhost}><Trash2 size={14} /></button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RecipesAdmin({ catalog, rawMaterials, recipeItems, setRecipeForCatalogItem, costOf, flash }) {
+  const [editingId, setEditingId] = useState(null);
+  const [draftItems, setDraftItems] = useState([]);
+
+  const openRecipe = (catalogId) => {
+    const existing = recipeItems.filter((r) => r.catalog_id === catalogId).map((r) => ({ raw_material_id: r.raw_material_id, quantity: r.quantity }));
+    setDraftItems(existing.length ? existing : [{ raw_material_id: "", quantity: "" }]);
+    setEditingId(catalogId);
+  };
+  const addLine = () => setDraftItems([...draftItems, { raw_material_id: "", quantity: "" }]);
+  const updateLine = (idx, patch) => setDraftItems(draftItems.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
+  const removeLine = (idx) => setDraftItems(draftItems.filter((_, i) => i !== idx));
+  const save = () => {
+    setRecipeForCatalogItem(editingId, draftItems.filter((l) => l.raw_material_id && l.quantity));
+    setEditingId(null);
+  };
+
+  if (rawMaterials.length === 0) {
+    return <div style={styles.emptyState}>Ajoute d'abord des matières premières avant de créer des recettes.</div>;
+  }
+
+  return (
+    <div style={styles.catalogueTable}>
+      {catalog.length === 0 && <div style={styles.emptyState}>Ajoute d'abord des produits au catalogue.</div>}
+      {catalog.map((item) => {
+        const items = recipeItems.filter((r) => r.catalog_id === item.id);
+        const cost = costOf(item.id);
+        const margin = Number(item.price) - cost;
+        return (
+          <div key={item.id} style={styles.catalogueRow}>
+            <div style={{ flex: 1 }}>
+              <div style={styles.catalogueRowName}>{item.name}</div>
+              <div style={styles.orderMeta}>
+                {items.length === 0 ? "Aucune recette définie" : `${items.length} ingrédient${items.length > 1 ? "s" : ""} · coût ${cost.toFixed(2)} DH · marge ${margin.toFixed(2)} DH`}
+              </div>
+            </div>
+            <button onClick={() => openRecipe(item.id)} style={styles.tarifBtn}>{items.length ? "Modifier" : "Créer la recette"}</button>
+          </div>
+        );
+      })}
+
+      {editingId && (
+        <div style={styles.modalOverlay} onClick={() => setEditingId(null)}>
+          <div style={styles.modalBox} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHead}>
+              <div style={styles.pinTitle}>Recette — {catalog.find((c) => c.id === editingId)?.name}</div>
+              <button onClick={() => setEditingId(null)} style={styles.iconBtnGhost}><X size={18} /></button>
+            </div>
+            <div style={styles.modalNote}>Indique la quantité de chaque matière première nécessaire pour produire 1 unité.</div>
+            <div style={styles.modalList}>
+              {draftItems.map((line, idx) => (
+                <div key={idx} style={styles.modalRow}>
+                  <select value={line.raw_material_id} onChange={(e) => updateLine(idx, { raw_material_id: e.target.value })} style={styles.recipeSelect}>
+                    <option value="">Choisir…</option>
+                    {rawMaterials.map((m) => <option key={m.id} value={m.id}>{m.name} ({m.unit})</option>)}
+                  </select>
+                  <input type="number" step="0.001" placeholder="Qté" value={line.quantity} onChange={(e) => updateLine(idx, { quantity: e.target.value })} style={styles.modalPriceInput} />
+                  <button onClick={() => removeLine(idx)} style={styles.iconBtnGhost}><X size={14} /></button>
+                </div>
+              ))}
+            </div>
+            <button onClick={addLine} style={{ ...styles.tarifBtn, marginBottom: 12 }}><Plus size={13} /> Ajouter un ingrédient</button>
+            <button onClick={save} style={styles.primaryBtn}>Enregistrer la recette</button>
           </div>
         </div>
       )}
@@ -1021,6 +1355,14 @@ const styles = {
   brandSub: { fontSize: 11, color: C.textFaint, letterSpacing: 0.4, marginTop: 2 },
   logoutBtn: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 9, color: C.textMuted, cursor: "pointer", display: "flex" },
   navRow: { display: "flex", gap: 8, padding: "12px 20px", background: C.bgHead, borderBottom: `1px solid ${C.border}` },
+  subNavRow: { display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" },
+  subNavBtn: { background: C.surface, border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 8, padding: "8px 13px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
+  subNavBtnActive: { background: C.gold, borderColor: C.gold, color: "#1A1508" },
+  stockRow: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "11px 13px" },
+  stockQtyBadge: { fontFamily: "'Space Mono', monospace", fontSize: 12.5, background: C.surfaceAlt, border: `1px solid ${C.border}`, borderRadius: 7, padding: "6px 10px", color: C.text, whiteSpace: "nowrap" },
+  stockQtyBadgeLow: { color: C.danger, borderColor: C.danger, background: "rgba(192,82,74,0.12)" },
+  alertBox: { display: "flex", alignItems: "center", gap: 8, background: "rgba(192,82,74,0.12)", border: `1px solid ${C.danger}`, color: C.danger, borderRadius: 10, padding: "11px 14px", fontSize: 12.5, marginBottom: 20 },
+  recipeSelect: { flex: 1, border: `1px solid ${C.border}`, borderRadius: 7, padding: "8px 9px", fontSize: 13, background: C.bgHead, color: C.text, outline: "none" },
   navBtn: { flex: 1, background: "transparent", border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 9, padding: "9px 10px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 },
   navBtnActive: { background: C.gold, borderColor: C.gold, color: "#1A1508" },
   navBadge: { background: "rgba(0,0,0,0.3)", borderRadius: 10, fontSize: 10, padding: "1px 6px" },
