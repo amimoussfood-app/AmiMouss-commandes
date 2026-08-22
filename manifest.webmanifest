@@ -1,0 +1,12 @@
+{
+  "name": "Amimouss Food — Commandes",
+  "short_name": "Amimouss Food",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#14171C",
+  "theme_color": "#14171C",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
