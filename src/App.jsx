@@ -608,53 +608,73 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
 
 // ==================== ADMIN APP ====================
 function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
-  const [tab, setTab] = useState("commandes");
+  const [tab, setTab] = useState("home");
   const isPrincipal = currentAdmin?.role === "principal";
+
+  const modules = [
+    { k: "commandes", label: "Commandes", desc: "Suivi et facturation", icon: ClipboardList, badge: unseenCount },
+    { k: "catalogue", label: "Catalogue", desc: "Tes plats et prix", icon: Settings },
+    { k: "stock", label: "Stock", desc: "Matières & production", icon: Boxes },
+    { k: "clients", label: "Clients", desc: "Accès et tarifs", icon: Users },
+    { k: "societe", label: "Société", desc: "Infos & sécurité", icon: ShieldCheck },
+    ...(isPrincipal ? [{ k: "membres", label: "Membres", desc: "Accès & historique", icon: UserCog, badge: unseenLogins }] : []),
+  ];
+  const currentModule = modules.find((m) => m.k === tab);
+
+  const openTab = (k) => {
+    setTab(k);
+    if (k === "commandes") markAllSeen();
+    if (k === "membres") markActivitySeen();
+  };
 
   return (
     <div style={styles.shell}>
       <header style={styles.header}>
         <div style={styles.headerLeft}>
-          <img src={company.logo} alt="" style={styles.logoImgSmall} />
+          {tab !== "home" ? (
+            <button onClick={() => setTab("home")} style={styles.backIconBtn}><ArrowLeft size={18} /></button>
+          ) : (
+            <img src={company.logo} alt="" style={styles.logoImgSmall} />
+          )}
           <div>
-            <div style={styles.brand}>Espace pro</div>
-            <div style={styles.brandSub}>{currentAdmin?.name} {!isPrincipal && "· accès restreint"}</div>
+            <div style={styles.brand}>{tab === "home" ? "Espace pro" : currentModule?.label}</div>
+            <div style={styles.brandSub}>{tab === "home" ? `${currentAdmin?.name}${!isPrincipal ? " · accès restreint" : ""}` : currentModule?.desc}</div>
           </div>
         </div>
         <button onClick={onLogout} style={styles.logoutBtn}><LogOut size={15} /></button>
       </header>
-      <nav style={styles.navRow}>
-        {[
-          { k: "commandes", label: "Commandes", icon: ClipboardList, badge: unseenCount },
-          { k: "catalogue", label: "Catalogue", icon: Settings },
-          { k: "stock", label: "Stock", icon: Boxes },
-          { k: "clients", label: "Clients", icon: Users },
-          { k: "societe", label: "Société", icon: ShieldCheck },
-          ...(isPrincipal ? [{ k: "membres", label: "Membres", icon: UserCog, badge: unseenLogins }] : []),
-        ].map((t) => (
-          <button key={t.k} onClick={() => { setTab(t.k); if (t.k === "commandes") markAllSeen(); if (t.k === "membres") markActivitySeen(); }}
-            style={{ ...styles.navBtn, ...(tab === t.k ? styles.navBtnActive : {}) }}>
-            <t.icon size={14} />{t.label}
-            {!!t.badge && <span style={styles.navBadge}>{t.badge}</span>}
-          </button>
-        ))}
-      </nav>
-      <main style={styles.main}>
-        {tab === "commandes" && <OrdersAdmin company={company} orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture} clients={clients} flash={flash} />}
-        {tab === "catalogue" && <CatalogueAdmin catalog={catalog} addCatalogItem={addCatalogItem} updateCatalogItem={updateCatalogItem} deleteCatalogItem={deleteCatalogItem} flash={flash} />}
-        {tab === "stock" && (
-          <StockAdmin
-            catalog={catalog} rawMaterials={rawMaterials} addRawMaterial={addRawMaterial}
-            updateRawMaterial={updateRawMaterial} deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
-            recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock} flash={flash}
-          />
-        )}
-        {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} flash={flash} canDelete={isPrincipal} />}
-        {tab === "societe" && <SocieteAdmin company={company} isPrincipal={isPrincipal} changeAdminPin={changeAdminPin} settings={settings} updateNotificationSettings={updateNotificationSettings} flash={flash} />}
-        {tab === "membres" && isPrincipal && (
-          <MembresAdmin adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember} activityLog={activityLog} flash={flash} />
-        )}
-      </main>
+
+      {tab === "home" ? (
+        <main style={styles.main}>
+          <div style={styles.moduleGrid}>
+            {modules.map((m) => (
+              <button key={m.k} onClick={() => openTab(m.k)} style={styles.moduleCard}>
+                {!!m.badge && <span style={styles.moduleBadge}>{m.badge}</span>}
+                <m.icon size={26} color={C.gold} strokeWidth={1.7} />
+                <div style={styles.moduleCardLabel}>{m.label}</div>
+                <div style={styles.moduleCardDesc}>{m.desc}</div>
+              </button>
+            ))}
+          </div>
+        </main>
+      ) : (
+        <main style={styles.main}>
+          {tab === "commandes" && <OrdersAdmin company={company} orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture} clients={clients} flash={flash} />}
+          {tab === "catalogue" && <CatalogueAdmin catalog={catalog} addCatalogItem={addCatalogItem} updateCatalogItem={updateCatalogItem} deleteCatalogItem={deleteCatalogItem} flash={flash} />}
+          {tab === "stock" && (
+            <StockAdmin
+              catalog={catalog} rawMaterials={rawMaterials} addRawMaterial={addRawMaterial}
+              updateRawMaterial={updateRawMaterial} deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
+              recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock} flash={flash}
+            />
+          )}
+          {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} flash={flash} canDelete={isPrincipal} />}
+          {tab === "societe" && <SocieteAdmin company={company} isPrincipal={isPrincipal} changeAdminPin={changeAdminPin} settings={settings} updateNotificationSettings={updateNotificationSettings} flash={flash} />}
+          {tab === "membres" && isPrincipal && (
+            <MembresAdmin adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember} activityLog={activityLog} flash={flash} />
+          )}
+        </main>
+      )}
     </div>
   );
 }
@@ -1588,6 +1608,16 @@ const styles = {
   brandSub: { fontSize: 11, color: C.textFaint, letterSpacing: 0.4, marginTop: 2 },
   logoutBtn: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 9, color: C.textMuted, cursor: "pointer", display: "flex" },
   navRow: { display: "flex", gap: 8, padding: "12px 20px", background: C.bgHead, borderBottom: `1px solid ${C.border}` },
+  backIconBtn: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 8, padding: 8, color: C.text, cursor: "pointer", display: "flex" },
+  moduleGrid: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12 },
+  moduleCard: {
+    position: "relative", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16,
+    padding: "22px 16px", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+    cursor: "pointer", textAlign: "left", minHeight: 118,
+  },
+  moduleCardLabel: { fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 15.5, color: C.text, marginTop: 2 },
+  moduleCardDesc: { fontSize: 11.5, color: C.textFaint },
+  moduleBadge: { position: "absolute", top: 12, right: 12, background: C.danger, color: "#fff", fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "2px 8px", minWidth: 18, textAlign: "center" },
   subNavRow: { display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" },
   subNavBtn: { background: C.surface, border: `1px solid ${C.border}`, color: C.textMuted, borderRadius: 8, padding: "8px 13px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
   subNavBtnActive: { background: C.gold, borderColor: C.gold, color: "#1A1508" },
