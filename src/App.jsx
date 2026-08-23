@@ -32,6 +32,13 @@ const sbDelete = (table, id) => sb(`${table}?id=eq.${id}`, { method: "DELETE", p
 const sbSingleton = async (table) => (await sb(`${table}?id=eq.1&select=*`))[0];
 const sbUpdateSingleton = async (table, patch) => (await sb(`${table}?id=eq.1`, { method: "PATCH", body: JSON.stringify(patch) }))[0];
 
+// Envoi d'une alerte WhatsApp via CallMeBot (service gratuit tiers, configuré par l'admin)
+function sendWhatsAppAlert(settings, text) {
+  if (!settings?.whatsapp_phone || !settings?.whatsapp_apikey) return;
+  const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(settings.whatsapp_phone)}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(settings.whatsapp_apikey)}`;
+  fetch(url, { mode: "no-cors" }).catch(() => {});
+}
+
 const mapOrder = (r) => ({
   ...r,
   clientId: r.client_id,
@@ -39,6 +46,7 @@ const mapOrder = (r) => ({
   blNumber: r.bl_number,
   factureNumber: r.facture_number,
   factureDate: r.facture_date,
+  vatIncluded: r.vat_included,
   total: Number(r.total),
   items: (r.items || []).map((it) => ({ ...it, price: Number(it.price) })),
 });
@@ -262,6 +270,14 @@ export default function App() {
       return true;
     } catch { flash("Échec de la mise à jour"); return false; }
   };
+  const updateNotificationSettings = async (patch) => {
+    try {
+      const updated = await sbUpdateSingleton("settings", patch);
+      setSettingsState(updated);
+      flash("Réglages de notification enregistrés");
+      return true;
+    } catch { flash("Échec de la mise à jour"); return false; }
+  };
 
   // ---- matières premières CRUD ----
   const addRawMaterial = async (item) => {
@@ -313,6 +329,10 @@ export default function App() {
         if (!rm) continue;
         const newQty = Number(rm.stock_quantity) - Number(ri.quantity) * qty;
         await updateRawMaterial(rm.id, { stock_quantity: newQty });
+        const threshold = Number(rm.alert_threshold || 0);
+        if (settings.whatsapp_notify_stock && newQty <= threshold && Number(rm.stock_quantity) > threshold) {
+          sendWhatsAppAlert(settings, `⚠️ Stock bas — "${rm.name}" : ${newQty} ${rm.unit} restant(s) (seuil: ${threshold}).`);
+        }
       }
       const newStock = Number(catalogItem.stock_quantity || 0) + Number(qty);
       await updateCatalogItem(catalogItem.id, { stock_quantity: newStock });
@@ -341,6 +361,13 @@ export default function App() {
       const inserted = await sbInsert("orders", row);
       setOrders((o) => [mapOrder(inserted), ...o]);
 
+      if (settings.whatsapp_notify_orders) {
+        sendWhatsAppAlert(
+          settings,
+          `🛎️ Nouvelle commande ${blNumber}\nClient: ${order.denomination || "—"}\nTotal: ${Number(order.total).toFixed(2)} DH`
+        );
+      }
+
       // Déduction automatique du stock (matières premières + produits finis)
       for (const line of order.items) {
         const catItem = catalog.find((c) => c.id === line.id);
@@ -349,6 +376,9 @@ export default function App() {
           try {
             const patched = await sbUpdate("catalog", catItem.id, { stock_quantity: newFinished });
             setCatalog((c) => c.map((i) => (i.id === catItem.id ? patched : i)));
+            if (settings.whatsapp_notify_stock && newFinished <= 0 && Number(catItem.stock_quantity || 0) > 0) {
+              sendWhatsAppAlert(settings, `⚠️ Stock critique — "${catItem.name}" : ${newFinished} en stock.`);
+            }
           } catch {}
         }
         const linkedRecipe = recipeItems.filter((r) => r.catalog_id === line.id);
@@ -359,6 +389,10 @@ export default function App() {
           try {
             const patched = await sbUpdate("raw_materials", rm.id, { stock_quantity: newQty });
             setRawMaterials((rows) => rows.map((x) => (x.id === rm.id ? patched : x)));
+            const threshold = Number(rm.alert_threshold || 0);
+            if (settings.whatsapp_notify_stock && newQty <= threshold && Number(rm.stock_quantity) > threshold) {
+              sendWhatsAppAlert(settings, `⚠️ Stock bas — "${rm.name}" : ${newQty} ${rm.unit} restant(s) (seuil: ${threshold}).`);
+            }
           } catch {}
         }
       }
@@ -507,6 +541,7 @@ export default function App() {
           recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock}
           adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember}
           changeAdminPin={changeAdminPin} activityLog={activityLog} unseenLogins={unseenLogins} markActivitySeen={markActivitySeen}
+          settings={settings} updateNotificationSettings={updateNotificationSettings}
           unseenCount={unseenCount} markAllSeen={markAllSeen}
           onLogout={logout} flash={flash}
         />
@@ -572,7 +607,7 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
 }
 
 // ==================== ADMIN APP ====================
-function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, onLogout, flash }) {
+function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
   const [tab, setTab] = useState("commandes");
   const isPrincipal = currentAdmin?.role === "principal";
 
@@ -615,7 +650,7 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
           />
         )}
         {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} flash={flash} canDelete={isPrincipal} />}
-        {tab === "societe" && <SocieteAdmin company={company} isPrincipal={isPrincipal} settingsAccess={isPrincipal} changeAdminPin={changeAdminPin} flash={flash} />}
+        {tab === "societe" && <SocieteAdmin company={company} isPrincipal={isPrincipal} changeAdminPin={changeAdminPin} settings={settings} updateNotificationSettings={updateNotificationSettings} flash={flash} />}
         {tab === "membres" && isPrincipal && (
           <MembresAdmin adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember} activityLog={activityLog} flash={flash} />
         )}
@@ -677,7 +712,7 @@ function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFactur
           </div>
         );
       })}
-      {docView && <DocumentModal company={company} order={docView.order} type={docView.type} client={clientOf(docView.order)} onClose={() => setDocView(null)} />}
+      {docView && <DocumentModal company={company} order={docView.order} type={docView.type} client={clientOf(docView.order)} onClose={() => setDocView(null)} onToggleVat={(val) => updateOrder(docView.order.id, { vat_included: val })} />}
     </div>
   );
 }
@@ -1106,7 +1141,7 @@ function RecipesAdmin({ catalog, rawMaterials, recipeItems, setRecipeForCatalogI
   );
 }
 
-function SocieteAdmin({ company, isPrincipal, changeAdminPin, flash }) {
+function SocieteAdmin({ company, isPrincipal, changeAdminPin, settings, updateNotificationSettings, flash }) {
   const rows = [
     ["Dénomination", company.name], ["ICE", company.ice], ["Registre de commerce", company.rc],
     ["Adresse", company.address], ["Téléphone", company.phone], ["Email", company.email],
@@ -1114,12 +1149,25 @@ function SocieteAdmin({ company, isPrincipal, changeAdminPin, flash }) {
   const [currentPin, setCurrentPin] = useState("");
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
+  const [waPhone, setWaPhone] = useState(settings?.whatsapp_phone || "");
+  const [waKey, setWaKey] = useState(settings?.whatsapp_apikey || "");
+  const [notifyOrders, setNotifyOrders] = useState(settings?.whatsapp_notify_orders !== false);
+  const [notifyStock, setNotifyStock] = useState(settings?.whatsapp_notify_stock !== false);
 
   const submitChangePin = async () => {
     if (newPin.trim().length < 4) return flash("4 caractères minimum");
     if (newPin !== confirmPin) return flash("Les deux codes ne correspondent pas");
     const ok = await changeAdminPin(newPin.trim());
     if (ok) { flash("Code d'accès mis à jour"); setCurrentPin(""); setNewPin(""); setConfirmPin(""); }
+  };
+
+  const saveWhatsApp = () => {
+    updateNotificationSettings({
+      whatsapp_phone: waPhone.trim(),
+      whatsapp_apikey: waKey.trim(),
+      whatsapp_notify_orders: notifyOrders,
+      whatsapp_notify_stock: notifyStock,
+    });
   };
 
   return (
@@ -1141,6 +1189,28 @@ function SocieteAdmin({ company, isPrincipal, changeAdminPin, flash }) {
             <input type="password" placeholder="Nouveau code (4 caractères min.)" value={newPin} onChange={(e) => setNewPin(e.target.value)} style={styles.addInput} />
             <input type="password" placeholder="Confirmer le nouveau code" value={confirmPin} onChange={(e) => setConfirmPin(e.target.value)} style={styles.addInput} />
             <button onClick={submitChangePin} style={styles.primaryBtn}>Mettre à jour mon code</button>
+          </div>
+        </div>
+      )}
+
+      {isPrincipal && (
+        <div style={{ ...styles.societeBox, marginTop: 18 }}>
+          <div style={styles.catLabel}>Alertes WhatsApp</div>
+          <div style={styles.societeNote}>
+            Configure une fois ton numéro et ta clé CallMeBot (récupérée sur WhatsApp après activation) pour recevoir les alertes.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
+            <input placeholder="Ton numéro WhatsApp (ex: +212600000000)" value={waPhone} onChange={(e) => setWaPhone(e.target.value)} style={styles.addInput} />
+            <input placeholder="Clé API CallMeBot" value={waKey} onChange={(e) => setWaKey(e.target.value)} style={styles.addInput} />
+            <label style={styles.checkboxRow}>
+              <input type="checkbox" checked={notifyOrders} onChange={(e) => setNotifyOrders(e.target.checked)} />
+              Alerte à chaque nouvelle commande
+            </label>
+            <label style={styles.checkboxRow}>
+              <input type="checkbox" checked={notifyStock} onChange={(e) => setNotifyStock(e.target.checked)} />
+              Alerte quand un produit/matière passe sous son seuil
+            </label>
+            <button onClick={saveWhatsApp} style={styles.primaryBtn}>Enregistrer</button>
           </div>
         </div>
       )}
@@ -1196,17 +1266,25 @@ function MembresAdmin({ adminUsers, addAdminMember, deleteAdminMember, activityL
 }
 
 // ==================== DOCUMENT (BL / FACTURE) ====================
-function DocumentModal({ company, order, type, client, onClose }) {
+function DocumentModal({ company, order, type, client, onClose, onToggleVat }) {
   const isFacture = type === "facture";
   const docTitle = isFacture ? "FACTURE" : "BON DE LIVRAISON";
   const docNumber = isFacture ? order.factureNumber : order.blNumber;
   const docDate = isFacture ? order.factureDate : order.date;
+  const vatAmount = order.total - order.total / 1.2;
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
       <div style={styles.docModalBox} onClick={(e) => e.stopPropagation()}>
         <div style={styles.docModalActions}>
-          <button onClick={() => window.print()} style={styles.printBtn}><Printer size={14} /> Imprimer / PDF</button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button onClick={() => window.print()} style={styles.printBtn}><Printer size={14} /> Imprimer / PDF</button>
+            {isFacture && onToggleVat && (
+              <button onClick={() => onToggleVat(!order.vatIncluded)} style={order.vatIncluded ? styles.vatBtnActive : styles.vatBtn}>
+                {order.vatIncluded ? "✓ TVA 20% affichée" : "Afficher TVA 20%"}
+              </button>
+            )}
+          </div>
           <button onClick={onClose} style={styles.iconBtnGhost}><X size={20} /></button>
         </div>
         <div id="print-area" style={styles.docPaper}>
@@ -1259,6 +1337,9 @@ function DocumentModal({ company, order, type, client, onClose }) {
             <span>TOTAL {isFacture ? "TTC" : ""}</span>
             <span style={styles.docTotalVal}>{order.total.toFixed(2)} DH</span>
           </div>
+          {isFacture && order.vatIncluded && (
+            <div style={styles.docVatRow}>DONT TVA 20% : {vatAmount.toFixed(2)} DH</div>
+          )}
           {order.notes && <div style={styles.docNotes}>Notes : {order.notes}</div>}
           <div style={styles.docFooter}>
             {isFacture ? "Facture générée après livraison." : "Bon de livraison — la facture sera établie après livraison."}
@@ -1604,10 +1685,14 @@ const styles = {
   societeLabel: { fontSize: 12.5, color: C.textMuted, fontWeight: 600 },
   societeVal: { fontSize: 13, textAlign: "right", maxWidth: "60%", color: C.text },
   societeNote: { fontSize: 12, color: C.gold, fontStyle: "italic", marginTop: 14, textAlign: "center" },
+  checkboxRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.text },
 
   docModalBox: { background: "#fff", borderRadius: 14, padding: 0, width: "100%", maxWidth: 560, maxHeight: "92vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" },
   docModalActions: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px", background: "#F4F2ED", position: "sticky", top: 0 },
   printBtn: { background: "#1A1D22", color: "#fff", border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, display: "flex", alignItems: "center", gap: 6, cursor: "pointer" },
+  vatBtn: { background: "#fff", color: "#1A1D22", border: "1px solid #ccc", borderRadius: 8, padding: "9px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  vatBtnActive: { background: "#e3f0e8", color: "#1F5C3A", border: "1px solid #6FA383", borderRadius: 8, padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" },
+  docVatRow: { textAlign: "right", fontSize: 12, color: "#555", marginTop: 4 },
   docPaper: { padding: "30px 32px 36px", color: "#1A1D22", fontFamily: "'Inter', sans-serif" },
   docHead: { display: "flex", alignItems: "center", gap: 16, borderBottom: "2px solid #1A1D22", paddingBottom: 18, marginBottom: 18 },
   docLogo: { width: 58, height: 58, objectFit: "contain" },
