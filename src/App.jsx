@@ -1392,6 +1392,13 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
     });
   };
   const changeQty = (id, delta) => setLines((prev) => prev.map((l) => (l.id === id ? { ...l, qty: l.qty + delta } : l)).filter((l) => l.qty > 0));
+  const setQty = (id, value) => {
+    const qty = parseInt(value, 10);
+    setLines((prev) => {
+      if (!qty || qty <= 0) return prev.filter((l) => l.id !== id);
+      return prev.map((l) => (l.id === id ? { ...l, qty } : l));
+    });
+  };
   const removeLine = (id) => setLines((prev) => prev.filter((l) => l.id !== id));
   const total = lines.reduce((s, l) => s + l.price * l.qty, 0);
 
@@ -1460,6 +1467,10 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
         {view === "commander" && (
           <div style={styles.orderLayout}>
             <section>
+              <div style={styles.deliveryNotice}>
+                <Clock size={15} />
+                <span>Commande passée avant <b>13h</b> : traitée et livrée le <b>jour même</b>. Après 13h : traitée et livrée le <b>lendemain</b>.</span>
+              </div>
               <div style={styles.searchRow}>
                 <Search size={16} color="#8B93A0" />
                 <input placeholder="Chercher un plat…" value={search} onChange={(e) => setSearch(e.target.value)} style={styles.searchInput} />
@@ -1495,7 +1506,14 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
                       <div style={styles.ticketLineBottom}>
                         <div style={styles.qtyControl}>
                           <button onClick={() => changeQty(l.id, -1)} style={styles.qtyBtn}><Minus size={12} /></button>
-                          <span style={styles.qtyVal}>{l.qty}</span>
+                          <input
+                            type="number"
+                            min="1"
+                            value={l.qty}
+                            onChange={(e) => setQty(l.id, e.target.value)}
+                            onFocus={(e) => e.target.select()}
+                            style={styles.qtyInput}
+                          />
                           <button onClick={() => changeQty(l.id, 1)} style={styles.qtyBtn}><Plus size={12} /></button>
                         </div>
                         <span style={styles.ticketLinePrice}>{(l.price * l.qty).toFixed(2)} DH</span>
@@ -1653,6 +1671,11 @@ const styles = {
   qtyControl: { display: "flex", alignItems: "center", gap: 8 },
   qtyBtn: { width: 23, height: 23, borderRadius: "50%", border: `1px solid ${C.borderLight}`, background: C.surfaceAlt, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.text },
   qtyVal: { fontFamily: "'Space Mono', monospace", fontSize: 13, minWidth: 14, textAlign: "center", color: C.text },
+  deliveryNotice: { display: "flex", alignItems: "flex-start", gap: 8, background: C.goldSoft, border: `1px solid ${C.gold}`, borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: C.text, lineHeight: 1.5, marginBottom: 18 },
+  qtyInput: {
+    width: 40, fontFamily: "'Space Mono', monospace", fontSize: 13, textAlign: "center", color: C.text,
+    background: C.bgHead, border: `1px solid ${C.borderLight}`, borderRadius: 6, padding: "3px 2px", outline: "none",
+  },
   ticketLinePrice: { fontFamily: "'Space Mono', monospace", fontSize: 13, color: C.text },
   iconBtnGhost: { background: "none", border: "none", color: C.gold, cursor: "pointer", padding: 2, display: "flex" },
   ticketNotes: { width: "100%", boxSizing: "border-box", border: `1px solid ${C.border}`, borderRadius: 8, background: C.bgHead, padding: 9, fontSize: 12.5, color: C.text, resize: "none", outline: "none", marginTop: 8 },
