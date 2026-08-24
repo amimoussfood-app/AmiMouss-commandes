@@ -32,11 +32,11 @@ const sbDelete = (table, id) => sb(`${table}?id=eq.${id}`, { method: "DELETE", p
 const sbSingleton = async (table) => (await sb(`${table}?id=eq.1&select=*`))[0];
 const sbUpdateSingleton = async (table, patch) => (await sb(`${table}?id=eq.1`, { method: "PATCH", body: JSON.stringify(patch) }))[0];
 
-// Envoi d'une alerte WhatsApp via CallMeBot (service gratuit tiers, configuré par l'admin)
+// Envoi d'une alerte Telegram (appel direct à l'API Telegram, gratuite et sans limite)
 function sendWhatsAppAlert(settings, text) {
-  if (!settings?.whatsapp_phone || !settings?.whatsapp_apikey) return;
-  const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(settings.whatsapp_phone)}&text=${encodeURIComponent(text)}&apikey=${encodeURIComponent(settings.whatsapp_apikey)}`;
-  fetch(url, { mode: "no-cors" }).catch(() => {});
+  if (!settings?.telegram_bot_token || !settings?.telegram_chat_id) return;
+  const url = `https://api.telegram.org/bot${settings.telegram_bot_token}/sendMessage?chat_id=${encodeURIComponent(settings.telegram_chat_id)}&text=${encodeURIComponent(text)}`;
+  fetch(url).catch(() => {});
 }
 
 const mapOrder = (r) => ({
@@ -1169,8 +1169,8 @@ function SocieteAdmin({ company, isPrincipal, changeAdminPin, settings, updateNo
   const [currentPin, setCurrentPin] = useState("");
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
-  const [waPhone, setWaPhone] = useState(settings?.whatsapp_phone || "");
-  const [waKey, setWaKey] = useState(settings?.whatsapp_apikey || "");
+  const [tgToken, setTgToken] = useState(settings?.telegram_bot_token || "");
+  const [tgChatId, setTgChatId] = useState(settings?.telegram_chat_id || "");
   const [notifyOrders, setNotifyOrders] = useState(settings?.whatsapp_notify_orders !== false);
   const [notifyStock, setNotifyStock] = useState(settings?.whatsapp_notify_stock !== false);
 
@@ -1181,10 +1181,10 @@ function SocieteAdmin({ company, isPrincipal, changeAdminPin, settings, updateNo
     if (ok) { flash("Code d'accès mis à jour"); setCurrentPin(""); setNewPin(""); setConfirmPin(""); }
   };
 
-  const saveWhatsApp = () => {
+  const saveTelegram = () => {
     updateNotificationSettings({
-      whatsapp_phone: waPhone.trim(),
-      whatsapp_apikey: waKey.trim(),
+      telegram_bot_token: tgToken.trim(),
+      telegram_chat_id: tgChatId.trim(),
       whatsapp_notify_orders: notifyOrders,
       whatsapp_notify_stock: notifyStock,
     });
@@ -1215,13 +1215,13 @@ function SocieteAdmin({ company, isPrincipal, changeAdminPin, settings, updateNo
 
       {isPrincipal && (
         <div style={{ ...styles.societeBox, marginTop: 18 }}>
-          <div style={styles.catLabel}>Alertes WhatsApp</div>
+          <div style={styles.catLabel}>Alertes Telegram</div>
           <div style={styles.societeNote}>
-            Configure une fois ton numéro et ta clé CallMeBot (récupérée sur WhatsApp après activation) pour recevoir les alertes.
+            Colle le token de ton bot et ton identifiant de discussion (obtenus via @BotFather et @userinfobot sur Telegram).
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
-            <input placeholder="Ton numéro WhatsApp (ex: +212600000000)" value={waPhone} onChange={(e) => setWaPhone(e.target.value)} style={styles.addInput} />
-            <input placeholder="Clé API CallMeBot" value={waKey} onChange={(e) => setWaKey(e.target.value)} style={styles.addInput} />
+            <input placeholder="Token du bot (ex: 123456:ABC-defGhIJK…)" value={tgToken} onChange={(e) => setTgToken(e.target.value)} style={styles.addInput} />
+            <input placeholder="Ton chat ID (ex: 123456789)" value={tgChatId} onChange={(e) => setTgChatId(e.target.value)} style={styles.addInput} />
             <label style={styles.checkboxRow}>
               <input type="checkbox" checked={notifyOrders} onChange={(e) => setNotifyOrders(e.target.checked)} />
               Alerte à chaque nouvelle commande
@@ -1230,7 +1230,7 @@ function SocieteAdmin({ company, isPrincipal, changeAdminPin, settings, updateNo
               <input type="checkbox" checked={notifyStock} onChange={(e) => setNotifyStock(e.target.checked)} />
               Alerte quand un produit/matière passe sous son seuil
             </label>
-            <button onClick={saveWhatsApp} style={styles.primaryBtn}>Enregistrer</button>
+            <button onClick={saveTelegram} style={styles.primaryBtn}>Enregistrer</button>
           </div>
         </div>
       )}
