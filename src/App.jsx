@@ -443,13 +443,14 @@ export default function App() {
         notes: order.notes,
         items: order.items,
         total: order.total,
-        status: "attente",
-        seen_by_admin: false,
+        status: order.status || "attente",
+        seen_by_admin: !!order.seenByAdmin,
         bl_number: blNumber,
         date: new Date().toISOString(),
       };
       const inserted = await sbInsert("orders", row);
-      setOrders((o) => [mapOrder(inserted), ...o]);
+      const mapped = mapOrder(inserted);
+      setOrders((o) => [mapped, ...o]);
 
       if (settings.whatsapp_notify_orders) {
         sendWhatsAppAlert(
@@ -487,7 +488,7 @@ export default function App() {
         }
       }
 
-      return true;
+      return mapped;
     } catch { flash("Échec de l'envoi de la commande"); return false; }
   };
   const updateOrder = async (id, patch) => {
@@ -624,7 +625,7 @@ export default function App() {
           company={COMPANY}
           currentAdmin={currentAdmin}
           catalog={catalog} addCatalogItem={addCatalogItem} updateCatalogItem={updateCatalogItem} deleteCatalogItem={deleteCatalogItem}
-          orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture}
+          orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture} addOrder={addOrder}
           clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient}
           rawMaterials={rawMaterials} addRawMaterial={addRawMaterial} updateRawMaterial={updateRawMaterial}
           deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
@@ -700,7 +701,7 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
 }
 
 // ==================== ADMIN APP ====================
-function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
+function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, addOrder, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
   const [tab, setTab] = useState("home");
   const isPrincipal = currentAdmin?.role === "principal";
 
@@ -752,7 +753,7 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
         </main>
       ) : (
         <main style={styles.main}>
-          {tab === "commandes" && <OrdersAdmin company={company} orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture} clients={clients} flash={flash} />}
+          {tab === "commandes" && <OrdersAdmin company={company} orders={orders} updateOrder={updateOrder} deleteOrder={deleteOrder} generateFacture={generateFacture} addOrder={addOrder} catalog={catalog} clients={clients} flash={flash} />}
           {tab === "catalogue" && <CatalogueAdmin catalog={catalog} addCatalogItem={addCatalogItem} updateCatalogItem={updateCatalogItem} deleteCatalogItem={deleteCatalogItem} flash={flash} />}
           {tab === "stock" && (
             <StockAdmin
@@ -772,8 +773,9 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
   );
 }
 
-function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFacture, clients, flash }) {
+function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFacture, addOrder, catalog, clients, flash }) {
   const [docView, setDocView] = useState(null);
+  const [showCreate, setShowCreate] = useState(false);
 
   const cycleStatus = (o) => {
     const keys = Object.keys(STATUS);
@@ -784,6 +786,7 @@ function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFactur
 
   return (
     <div style={styles.historyList}>
+      <button onClick={() => setShowCreate(true)} style={styles.addBtn}><Plus size={16} /> Nouvelle commande / facture</button>
       {orders.length === 0 && <div style={styles.emptyState}>Aucune commande pour le moment.</div>}
       {orders.map((o) => {
         const st = STATUS[o.status];
@@ -826,6 +829,133 @@ function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFactur
         );
       })}
       {docView && <DocumentModal company={company} order={docView.order} type={docView.type} client={clientOf(docView.order)} onClose={() => setDocView(null)} onToggleVat={(val) => updateOrder(docView.order.id, { vat_included: val })} />}
+      {showCreate && (
+        <CreateOrderModal
+          catalog={catalog}
+          clients={clients}
+          addOrder={addOrder}
+          updateOrder={updateOrder}
+          generateFacture={generateFacture}
+          flash={flash}
+          onClose={() => setShowCreate(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreateOrderModal({ catalog, clients, addOrder, updateOrder, generateFacture, flash, onClose }) {
+  const [clientId, setClientId] = useState(clients[0]?.id || "");
+  const [search, setSearch] = useState("");
+  const [lines, setLines] = useState([]);
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const client = clients.find((c) => c.id === clientId);
+  const filteredCatalog = sortByOrder(catalog).filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
+  const total = lines.reduce((s, l) => s + l.price * l.qty, 0);
+
+  const addLine = (item) => {
+    if (!client) return flash("Choisis d'abord un partenaire");
+    const price = effectivePrice(item, client);
+    setLines((prev) => {
+      const found = prev.find((l) => l.id === item.id);
+      if (found) return prev.map((l) => (l.id === item.id ? { ...l, qty: l.qty + 1 } : l));
+      return [...prev, { id: item.id, name: item.name, price, qty: 1 }];
+    });
+  };
+  const changeQty = (id, delta) =>
+    setLines((prev) => prev.map((l) => (l.id === id ? { ...l, qty: l.qty + delta } : l)).filter((l) => l.qty > 0));
+  const removeLine = (id) => setLines((prev) => prev.filter((l) => l.id !== id));
+
+  const buildOrder = () => ({
+    clientId: client.id,
+    denomination: client.denomination,
+    ice: client.ice,
+    address: client.address,
+    phone: client.phone,
+    notes: notes.trim(),
+    items: lines,
+    total,
+    seenByAdmin: true,
+  });
+
+  const saveAsOrder = async () => {
+    if (!client) return flash("Choisis un partenaire");
+    if (lines.length === 0) return flash("Ajoute au moins un article");
+    setSaving(true);
+    const created = await addOrder(buildOrder());
+    setSaving(false);
+    if (created) { flash("Commande créée pour le partenaire"); onClose(); }
+  };
+
+  const saveAndInvoice = async () => {
+    if (!client) return flash("Choisis un partenaire");
+    if (lines.length === 0) return flash("Ajoute au moins un article");
+    setSaving(true);
+    const created = await addOrder({ ...buildOrder(), status: "livree" });
+    if (created) {
+      await generateFacture(created);
+      flash("Facture générée pour le partenaire");
+      onClose();
+    }
+    setSaving(false);
+  };
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modalBox, maxWidth: 520, width: "94%" }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHead}>
+          <div style={styles.pinTitle}>Nouvelle commande / facture</div>
+          <button onClick={onClose} style={styles.iconBtnGhost}><X size={16} /></button>
+        </div>
+
+        <div style={styles.modalNote}>Choisis le partenaire pour lequel tu enregistres cette commande — elle apparaîtra directement sur son compte.</div>
+        <select value={clientId} onChange={(e) => { setClientId(e.target.value); setLines([]); }} style={{ ...styles.addInput, width: "100%", marginTop: 6, marginBottom: 12 }}>
+          <option value="">— Choisir un partenaire —</option>
+          {clients.map((c) => <option key={c.id} value={c.id}>{c.denomination} ({c.code})</option>)}
+        </select>
+
+        <input placeholder="Rechercher un plat..." value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...styles.addInput, width: "100%", marginBottom: 8 }} />
+        <div style={{ maxHeight: 180, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+          {filteredCatalog.map((item) => (
+            <div key={item.id} style={{ ...styles.catalogueRow, cursor: client ? "pointer" : "not-allowed" }} onClick={() => addLine(item)}>
+              {item.image_url ? <img src={item.image_url} alt="" style={styles.imageThumb} /> : <div style={styles.imageThumbEmpty} />}
+              <span style={styles.catalogueRowName}>{item.name}</span>
+              <span style={styles.catalogueRowPrice}>{client ? effectivePrice(item, client).toFixed(2) : Number(item.price).toFixed(2)} DH</span>
+              <Plus size={15} />
+            </div>
+          ))}
+        </div>
+
+        {lines.length > 0 && (
+          <div style={{ ...styles.catalogueTable, marginBottom: 12 }}>
+            {lines.map((l) => (
+              <div key={l.id} style={styles.orderItemRow}>
+                <span>{l.name}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button onClick={() => changeQty(l.id, -1)} style={styles.iconBtnGhost}><Minus size={12} /></button>
+                  <span>{l.qty}</span>
+                  <button onClick={() => changeQty(l.id, 1)} style={styles.iconBtnGhost}><Plus size={12} /></button>
+                  <span>{(l.price * l.qty).toFixed(2)} DH</span>
+                  <button onClick={() => removeLine(l.id)} style={styles.iconBtnGhost}><Trash2 size={13} /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <textarea placeholder="Notes (optionnel)" value={notes} onChange={(e) => setNotes(e.target.value)} style={{ ...styles.ticketNotes, marginBottom: 12 }} />
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <span style={styles.orderTotal}>{total.toFixed(2)} DH</span>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <button onClick={saveAndInvoice} disabled={saving} style={styles.docBtnAccent}><Receipt size={14} /> Enregistrer et facturer directement</button>
+          <button onClick={saveAsOrder} disabled={saving} style={styles.primaryBtnSmall}>Enregistrer comme commande (en attente)</button>
+        </div>
+      </div>
     </div>
   );
 }
