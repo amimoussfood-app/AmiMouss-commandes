@@ -629,7 +629,7 @@ export default function App() {
     }
     flash("Code incorrect");
   };
-  const tryClientLogin = () => {
+  const tryClientLogin = (remember) => {
     const code = clientCodeInput.trim().toUpperCase();
     const found = clients.find((c) => c.code === code);
     if (found) {
@@ -637,6 +637,10 @@ export default function App() {
       setMode("client");
       setClientCodeInput("");
       setClientLoginError("");
+      try {
+        if (remember) localStorage.setItem("amimouss_partner_code", code);
+        else localStorage.removeItem("amimouss_partner_code");
+      } catch {}
     } else setClientLoginError("Code invalide. Vérifie auprès de ton traiteur.");
   };
   const logout = () => {
@@ -644,7 +648,20 @@ export default function App() {
     setAdminUnlocked(false);
     setCurrentAdmin(null);
     setActiveClient(null);
+    try { localStorage.removeItem("amimouss_partner_code"); } catch {}
   };
+
+  // Connexion automatique si "se souvenir de moi" était coché lors d'une session précédente
+  useEffect(() => {
+    if (!loaded || mode !== "client-login") return;
+    try {
+      const saved = localStorage.getItem("amimouss_partner_code");
+      if (saved) {
+        const found = clients.find((c) => c.code === saved);
+        if (found) { setActiveClient(found); setMode("client"); }
+      }
+    } catch {}
+  }, [loaded, clients, mode]);
 
   const COMPANY = {
     name: company.name || "Amimouss Food",
@@ -722,6 +739,7 @@ export default function App() {
           onSubmitOrder={addOrder}
           onLogout={logout}
           flash={flash}
+          otherCodes={clients.filter((c) => c.id !== activeClient.id).map((c) => c.code)}
         />
       )}
       {toast && <div style={styles.toast}>{toast}</div>}
@@ -749,6 +767,7 @@ function PinScreen({ title, subtitle, value, onChange, onSubmit, onBack, buttonL
 }
 
 function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, company }) {
+  const [remember, setRemember] = useState(true);
   return (
     <div style={styles.landingWrap}>
       <div style={styles.landingBrand}>
@@ -760,11 +779,15 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
         <div style={styles.pinTitle}>Ton code partenaire</div>
         <div style={styles.pinSub}>Ton traiteur t'a remis un code à 6 caractères.</div>
         <input value={value} onChange={(e) => onChange(e.target.value.toUpperCase())}
-          onKeyDown={(e) => e.key === "Enter" && onSubmit()}
+          onKeyDown={(e) => e.key === "Enter" && onSubmit(remember)}
           style={{ ...styles.pinInput, letterSpacing: 5, fontFamily: "'Space Mono', monospace" }}
           placeholder="XXXXXX" maxLength={6} autoFocus />
+        <label style={styles.rememberRow}>
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+          Se souvenir de moi sur cet appareil
+        </label>
         {error && <div style={styles.errorText}>{error}</div>}
-        <button onClick={onSubmit} style={styles.primaryBtn}>Entrer</button>
+        <button onClick={() => onSubmit(remember)} style={styles.primaryBtn}>Entrer</button>
       </div>
       <div style={styles.landingFooter}>
         <div>{company.name} {company.ice && `· ICE ${company.ice}`}</div>
@@ -1326,6 +1349,12 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
     if (row) flash(`Code créé : ${row.code}`);
   };
   const copyCode = (code) => { try { navigator.clipboard.writeText(code); flash("Code copié"); } catch { flash(code); } };
+  const resetCode = async (c) => {
+    if (!window.confirm(`Réinitialiser le code de "${c.denomination}" ? L'ancien code cessera de fonctionner.`)) return;
+    const newCode = genCode();
+    const row = await updateClient(c.id, { code: newCode });
+    if (row) flash(`Nouveau code pour ${c.denomination} : ${newCode}`);
+  };
 
   const startEdit = (c) => { setEditingId(c.id); setEditDraft(c); };
   const saveEdit = () => {
@@ -1397,6 +1426,7 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
               <button onClick={() => startEdit(c)} style={styles.iconBtnGhost}><Pencil size={13} /></button>
               <button onClick={() => openPricing(c)} style={styles.tarifBtn}>Tarifs</button>
               <button onClick={() => copyCode(c.code)} style={styles.codeChip}><Copy size={11} /> {c.code}</button>
+              <button onClick={() => resetCode(c)} style={styles.iconBtnGhost} title="Réinitialiser le code (code perdu)"><KeyRound size={13} /></button>
               {canDelete && <button onClick={() => deleteClient(c.id)} style={styles.iconBtnGhost}><Trash2 size={14} /></button>}
             </div>
           );
@@ -1896,7 +1926,7 @@ function DocumentModal({ company, order, type, client, onClose, onToggleVat }) {
 const effectivePrice = (item, client) =>
   client.prices && client.prices[item.id] !== undefined ? Number(client.prices[item.id]) : Number(item.price);
 
-function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitOrder, onLogout, flash }) {
+function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitOrder, onLogout, flash, otherCodes }) {
   const [view, setView] = useState("commander");
   const [lines, setLines] = useState([]);
   const [notes, setNotes] = useState("");
@@ -1960,6 +1990,26 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
       flash("Logo mis à jour");
     } catch { flash("Échec de l'envoi du logo"); }
     setLogoUploading(false);
+  };
+
+  const [newCode, setNewCode] = useState("");
+  const [codeError, setCodeError] = useState("");
+  const [savingCode, setSavingCode] = useState(false);
+  const changeMyCode = async () => {
+    const code = newCode.trim().toUpperCase();
+    if (code.length !== 6) return setCodeError("Le code doit faire 6 caractères.");
+    if (otherCodes && otherCodes.includes(code)) return setCodeError("Ce code est déjà utilisé, choisis-en un autre.");
+    setCodeError("");
+    setSavingCode(true);
+    const row = await onUpdateClient({ code });
+    setSavingCode(false);
+    if (row) {
+      setNewCode("");
+      try {
+        if (localStorage.getItem("amimouss_partner_code")) localStorage.setItem("amimouss_partner_code", code);
+      } catch {}
+      flash("Ton code d'accès a été changé. Utilise-le pour tes prochaines connexions.");
+    }
   };
 
   const filtered = sortByOrder(catalog).filter((c) => c.name.toLowerCase().includes(search.toLowerCase()));
@@ -2104,6 +2154,20 @@ function ClientApp({ company, client, onUpdateClient, catalog, orders, onSubmitO
               <input placeholder="Téléphone" value={profileDraft.phone} onChange={(e) => setProfileDraft({ ...profileDraft, phone: e.target.value })} style={styles.addInput} />
               <button onClick={saveProfile} style={styles.primaryBtn}>Enregistrer</button>
             </div>
+
+            <div style={{ ...styles.catLabel, marginTop: 26 }}>Code d'accès</div>
+            <div style={styles.societeNote}>Ton code actuel : <b>{client.code}</b>. Tu peux le changer ici si tu veux le personnaliser ou t'assurer qu'il reste secret.</div>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <input
+                value={newCode}
+                onChange={(e) => { setNewCode(e.target.value.toUpperCase()); setCodeError(""); }}
+                placeholder="Nouveau code (6 caractères)"
+                maxLength={6}
+                style={{ ...styles.addInput, flex: 1, fontFamily: "'Space Mono', monospace", letterSpacing: 2 }}
+              />
+              <button onClick={changeMyCode} disabled={savingCode} style={styles.primaryBtnSmall}>Changer</button>
+            </div>
+            {codeError && <div style={styles.errorText}>{codeError}</div>}
           </div>
         )}
       </main>
@@ -2236,6 +2300,7 @@ const styles = {
   addBtn: { background: C.gold, color: "#1A1508", border: "none", borderRadius: 8, padding: "10px 14px", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer" },
   catalogueTable: { display: "flex", flexDirection: "column", gap: 6 },
   reorderHint: { fontSize: 11.5, color: "var(--c-textfaint)", marginBottom: 8 },
+  rememberRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--c-textmuted)", margin: "10px 0 4px", cursor: "pointer" },
   themeToggle: {
     position: "fixed", bottom: 16, right: 16, zIndex: 50,
     width: 40, height: 40, borderRadius: "50%",
