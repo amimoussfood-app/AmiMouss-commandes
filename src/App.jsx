@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Plus, Minus, Trash2, X, Check, Clock, Search, Users, ClipboardList,
   Settings, LogOut, Copy, Pencil, ShieldCheck, ArrowLeft, FileText,
-  Printer, Truck, Receipt, User, Boxes, PackagePlus, AlertTriangle, UserCog, KeyRound, GripVertical
+  Printer, Truck, Receipt, User, Boxes, PackagePlus, AlertTriangle, UserCog, KeyRound, GripVertical, Sun, Moon
 } from "lucide-react";
 
 // ==================== SUPABASE ====================
@@ -174,20 +174,35 @@ export default function App() {
   const [company, setCompany] = useState({ name: "", ice: "", rc: "", address: "", phone: "", email: "" });
   const [toast, setToast] = useState("");
 
-  // Thème clair/sombre : suit le réglage du téléphone, avec re-detection si l'utilisateur change de mode en direct
+  // Thème clair/sombre : suit le réglage du téléphone par défaut, mais l'utilisateur peut forcer
+  // un mode manuellement (bouton dans l'en-tête) si la détection automatique ne fonctionne pas
+  // dans son navigateur/PWA. Le choix est mémorisé.
+  const [themeMode, setThemeMode] = useState(() => {
+    try { return localStorage.getItem("amimouss_theme") || "system"; } catch { return "system"; }
+  });
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: light)");
     const applyTheme = () => {
-      document.documentElement.setAttribute("data-theme", mq.matches ? "light" : "dark");
+      const effective = themeMode === "system" ? (mq.matches ? "light" : "dark") : themeMode;
+      document.documentElement.setAttribute("data-theme", effective);
     };
     applyTheme();
-    if (mq.addEventListener) mq.addEventListener("change", applyTheme);
-    else mq.addListener(applyTheme);
-    return () => {
-      if (mq.removeEventListener) mq.removeEventListener("change", applyTheme);
-      else mq.removeListener(applyTheme);
-    };
-  }, []);
+    if (themeMode === "system") {
+      if (mq.addEventListener) mq.addEventListener("change", applyTheme);
+      else mq.addListener(applyTheme);
+      return () => {
+        if (mq.removeEventListener) mq.removeEventListener("change", applyTheme);
+        else mq.removeListener(applyTheme);
+      };
+    }
+  }, [themeMode]);
+  const cycleTheme = () => {
+    setThemeMode((cur) => {
+      const next = cur === "system" ? "light" : cur === "light" ? "dark" : "system";
+      try { localStorage.setItem("amimouss_theme", next); } catch {}
+      return next;
+    });
+  };
 
   const [mode, setMode] = useState("client-login");
   const [adminUnlocked, setAdminUnlocked] = useState(false);
@@ -634,6 +649,9 @@ export default function App() {
         />
       )}
       {toast && <div style={styles.toast}>{toast}</div>}
+      <button onClick={cycleTheme} style={styles.themeToggle} title="Changer le thème">
+        {themeMode === "light" ? <Sun size={16} /> : themeMode === "dark" ? <Moon size={16} /> : <span style={{ fontSize: 10, fontWeight: 700 }}>AUTO</span>}
+      </button>
     </div>
   );
 }
@@ -1866,6 +1884,13 @@ const styles = {
   addBtn: { background: C.gold, color: "#1A1508", border: "none", borderRadius: 8, padding: "10px 14px", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer" },
   catalogueTable: { display: "flex", flexDirection: "column", gap: 6 },
   reorderHint: { fontSize: 11.5, color: "var(--c-textfaint)", marginBottom: 8 },
+  themeToggle: {
+    position: "fixed", bottom: 16, right: 16, zIndex: 50,
+    width: 40, height: 40, borderRadius: "50%",
+    background: "var(--c-surface)", border: `1px solid var(--c-border)`, color: "var(--c-text)",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    boxShadow: "0 2px 10px rgba(0,0,0,0.25)", cursor: "pointer",
+  },
   catalogueRow: { display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 10, padding: "11px 13px" },
   clientRow: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 10, padding: "11px 13px" },
   activityRow: { display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 9, padding: "9px 12px" },
