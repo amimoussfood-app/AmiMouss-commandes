@@ -600,6 +600,7 @@ export default function App() {
     setAdminUnlocked(true);
     setCurrentAdmin({ name: "Admin principal", role: "principal" });
     setMode("admin");
+    try { localStorage.setItem("amimouss_admin_session", JSON.stringify({ code: pinSetup.trim(), ts: Date.now() })); } catch {}
     flash("Code pro créé");
   };
   const tryAdminLogin = async () => {
@@ -609,6 +610,7 @@ export default function App() {
       setCurrentAdmin({ name: "Admin principal", role: "principal" });
       setMode("admin");
       setPinInput("");
+      try { localStorage.setItem("amimouss_admin_session", JSON.stringify({ code, ts: Date.now() })); } catch {}
       try {
         const row = await sbInsert("activity_log", { admin_name: "Admin principal", role: "principal", action: "Connexion" });
         setActivityLog((a) => [row, ...a]);
@@ -621,6 +623,7 @@ export default function App() {
       setCurrentAdmin({ name: member.name, role: "membre" });
       setMode("admin");
       setPinInput("");
+      try { localStorage.setItem("amimouss_admin_session", JSON.stringify({ code, ts: Date.now() })); } catch {}
       try {
         const row = await sbInsert("activity_log", { admin_name: member.name, role: "membre", action: "Connexion" });
         setActivityLog((a) => [row, ...a]);
@@ -648,8 +651,39 @@ export default function App() {
     setAdminUnlocked(false);
     setCurrentAdmin(null);
     setActiveClient(null);
-    try { localStorage.removeItem("amimouss_partner_code"); } catch {}
+    try {
+      localStorage.removeItem("amimouss_partner_code");
+      localStorage.removeItem("amimouss_admin_session");
+    } catch {}
   };
+
+  // Connexion automatique admin si une session récente existe (valable 24h, comme "se souvenir de moi")
+  useEffect(() => {
+    if (!loaded || mode !== "client-login") return;
+    try {
+      const raw = localStorage.getItem("amimouss_admin_session");
+      if (raw) {
+        const sess = JSON.parse(raw);
+        const ADMIN_SESSION_MAX_AGE = 24 * 60 * 60 * 1000; // 24h
+        if (sess.ts && Date.now() - sess.ts < ADMIN_SESSION_MAX_AGE) {
+          if (sess.code === settings.admin_code) {
+            setAdminUnlocked(true);
+            setCurrentAdmin({ name: "Admin principal", role: "principal" });
+            setMode("admin");
+            return;
+          }
+          const member = adminUsers.find((m) => m.code === sess.code);
+          if (member) {
+            setAdminUnlocked(true);
+            setCurrentAdmin({ name: member.name, role: "membre" });
+            setMode("admin");
+            return;
+          }
+        }
+        localStorage.removeItem("amimouss_admin_session");
+      }
+    } catch {}
+  }, [loaded, mode, settings.admin_code, adminUsers]);
 
   // Connexion automatique si "se souvenir de moi" était coché lors d'une session précédente
   useEffect(() => {
