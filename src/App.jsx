@@ -167,6 +167,8 @@ export default function App() {
   const [orders, setOrders] = useState([]);
   const [clients, setClients] = useState([]);
   const [rawMaterials, setRawMaterials] = useState([]);
+  const [warehouses, setWarehouses] = useState([]);
+  const [catalogStock, setCatalogStock] = useState([]);
   const [recipeItems, setRecipeItems] = useState([]);
   const [adminUsers, setAdminUsers] = useState([]);
   const [activityLog, setActivityLog] = useState([]);
@@ -220,7 +222,7 @@ export default function App() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [cat, cl, ord, set, comp, rm, ri, au, al] = await Promise.all([
+      const [cat, cl, ord, set, comp, rm, ri, au, al, wh, cs] = await Promise.all([
         sbSelect("catalog"),
         sbSelect("clients"),
         sbSelect("orders", "select=*&order=date.desc"),
@@ -230,6 +232,8 @@ export default function App() {
         sbSelect("recipe_items"),
         sbSelect("admin_users"),
         sbSelect("activity_log", "select=*&order=created_at.desc&limit=200"),
+        sbSelect("warehouses").catch(() => []),
+        sbSelect("catalog_stock").catch(() => []),
       ]);
       setCatalog(cat || []);
       setClients(cl || []);
@@ -240,6 +244,8 @@ export default function App() {
       setRecipeItems(ri || []);
       setAdminUsers(au || []);
       setActivityLog(al || []);
+      setWarehouses(wh || []);
+      setCatalogStock(cs || []);
       setLoadError(false);
     } catch (e) {
       setLoadError(true);
@@ -410,8 +416,55 @@ export default function App() {
     } catch { flash("Échec de l'enregistrement de la recette"); }
   };
 
+  // ---- entrepôts (multi-stock) ----
+  const addWarehouse = async (name) => {
+    try {
+      const row = await sbInsert("warehouses", { name: name.trim() });
+      setWarehouses((w) => [...w, row]);
+      return row;
+    } catch { flash("Échec de la création de l'entrepôt (as-tu bien créé la table ?)"); return null; }
+  };
+  const renameWarehouse = async (id, name) => {
+    try {
+      const row = await sbUpdate("warehouses", id, { name: name.trim() });
+      setWarehouses((w) => w.map((x) => (x.id === id ? row : x)));
+    } catch { flash("Échec du renommage"); }
+  };
+  const deleteWarehouse = async (id) => {
+    try {
+      await sbDelete("warehouses", id);
+      setWarehouses((w) => w.filter((x) => x.id !== id));
+      setCatalogStock((cs) => cs.filter((x) => x.warehouse_id !== id));
+    } catch { flash("Échec de la suppression"); }
+  };
+  const stockOf = (catalogId, warehouseId) => {
+    const row = catalogStock.find((cs) => cs.catalog_id === catalogId && cs.warehouse_id === warehouseId);
+    return Number(row?.quantity || 0);
+  };
+  const setStock = async (catalogId, warehouseId, qty) => {
+    try {
+      const existing = catalogStock.find((cs) => cs.catalog_id === catalogId && cs.warehouse_id === warehouseId);
+      if (existing) {
+        const row = await sbUpdate("catalog_stock", existing.id, { quantity: qty });
+        setCatalogStock((cs) => cs.map((x) => (x.id === existing.id ? row : x)));
+      } else {
+        const row = await sbInsert("catalog_stock", { catalog_id: catalogId, warehouse_id: warehouseId, quantity: qty });
+        setCatalogStock((cs) => [...cs, row]);
+      }
+    } catch { flash("Échec de la mise à jour du stock"); }
+  };
+  const transferStock = async (catalogId, fromWarehouseId, toWarehouseId, qty) => {
+    if (!fromWarehouseId || !toWarehouseId || fromWarehouseId === toWarehouseId || !qty) return;
+    const fromQty = stockOf(catalogId, fromWarehouseId);
+    const toQty = stockOf(catalogId, toWarehouseId);
+    if (fromQty < qty) return flash("Stock insuffisant dans l'entrepôt source");
+    await setStock(catalogId, fromWarehouseId, fromQty - qty);
+    await setStock(catalogId, toWarehouseId, toQty + qty);
+    flash(`${qty} unité(s) transférée(s)`);
+  };
+
   // ---- production (ajout de stock produit fini + consommation des matières) ----
-  const produceStock = async (catalogItem, qty) => {
+  const produceStock = async (catalogItem, qty, warehouseId) => {
     try {
       const items = recipeItems.filter((r) => r.catalog_id === catalogItem.id);
       for (const ri of items) {
@@ -424,8 +477,14 @@ export default function App() {
           sendWhatsAppAlert(settings, `⚠️ Stock bas — "${rm.name}" : ${newQty} ${rm.unit} restant(s) (seuil: ${threshold}).`);
         }
       }
-      const newStock = Number(catalogItem.stock_quantity || 0) + Number(qty);
-      await updateCatalogItem(catalogItem.id, { stock_quantity: newStock });
+      if (warehouseId) {
+        // Multi-entrepôts actif : le produit fini rejoint le stock de l'entrepôt choisi
+        await setStock(catalogItem.id, warehouseId, stockOf(catalogItem.id, warehouseId) + Number(qty));
+      } else {
+        // Pas encore d'entrepôts configurés : comportement d'origine (stock global)
+        const newStock = Number(catalogItem.stock_quantity || 0) + Number(qty);
+        await updateCatalogItem(catalogItem.id, { stock_quantity: newStock });
+      }
       flash(`${qty} unité(s) de ${catalogItem.name} ajoutée(s) au stock`);
     } catch { flash("Échec de la production"); }
   };
@@ -460,17 +519,31 @@ export default function App() {
       }
 
       // Déduction automatique du stock (matières premières + produits finis)
+      // Si des entrepôts sont configurés, on déduit du bon entrepôt selon celui du partenaire
+      // (sinon on garde l'ancien comportement : un stock global unique)
+      const orderClient = clients.find((c) => c.id === order.clientId);
+      const targetWarehouseId = warehouses.length > 0 ? (orderClient?.warehouse_id || warehouses[0].id) : null;
       for (const line of order.items) {
         const catItem = catalog.find((c) => c.id === line.id);
         if (catItem) {
-          const newFinished = Number(catItem.stock_quantity || 0) - Number(line.qty);
-          try {
-            const patched = await sbUpdate("catalog", catItem.id, { stock_quantity: newFinished });
-            setCatalog((c) => c.map((i) => (i.id === catItem.id ? patched : i)));
-            if (settings.whatsapp_notify_stock && newFinished <= 0 && Number(catItem.stock_quantity || 0) > 0) {
-              sendWhatsAppAlert(settings, `⚠️ Stock critique — "${catItem.name}" : ${newFinished} en stock.`);
+          if (targetWarehouseId) {
+            const current = stockOf(catItem.id, targetWarehouseId);
+            const newFinished = current - Number(line.qty);
+            await setStock(catItem.id, targetWarehouseId, newFinished);
+            if (settings.whatsapp_notify_stock && newFinished <= 0 && current > 0) {
+              const whName = warehouses.find((w) => w.id === targetWarehouseId)?.name || "";
+              sendWhatsAppAlert(settings, `⚠️ Stock critique — "${catItem.name}" (${whName}) : ${newFinished} en stock.`);
             }
-          } catch {}
+          } else {
+            const newFinished = Number(catItem.stock_quantity || 0) - Number(line.qty);
+            try {
+              const patched = await sbUpdate("catalog", catItem.id, { stock_quantity: newFinished });
+              setCatalog((c) => c.map((i) => (i.id === catItem.id ? patched : i)));
+              if (settings.whatsapp_notify_stock && newFinished <= 0 && Number(catItem.stock_quantity || 0) > 0) {
+                sendWhatsAppAlert(settings, `⚠️ Stock critique — "${catItem.name}" : ${newFinished} en stock.`);
+              }
+            } catch {}
+          }
         }
         const linkedRecipe = recipeItems.filter((r) => r.catalog_id === line.id);
         for (const ri of linkedRecipe) {
@@ -630,6 +703,8 @@ export default function App() {
           rawMaterials={rawMaterials} addRawMaterial={addRawMaterial} updateRawMaterial={updateRawMaterial}
           deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
           recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock}
+          warehouses={warehouses} addWarehouse={addWarehouse} renameWarehouse={renameWarehouse} deleteWarehouse={deleteWarehouse}
+          catalogStock={catalogStock} stockOf={stockOf} setStock={setStock} transferStock={transferStock}
           adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember}
           changeAdminPin={changeAdminPin} activityLog={activityLog} unseenLogins={unseenLogins} markActivitySeen={markActivitySeen}
           settings={settings} updateNotificationSettings={updateNotificationSettings}
@@ -701,7 +776,7 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
 }
 
 // ==================== ADMIN APP ====================
-function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, addOrder, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
+function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, addOrder, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, warehouses, addWarehouse, renameWarehouse, deleteWarehouse, catalogStock, stockOf, setStock, transferStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
   const [tab, setTab] = useState("home");
   const isPrincipal = currentAdmin?.role === "principal";
 
@@ -709,6 +784,7 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
     { k: "commandes", label: "Commandes", desc: "Suivi et facturation", icon: ClipboardList, badge: unseenCount },
     { k: "catalogue", label: "Catalogue", desc: "Tes plats et prix", icon: Settings },
     { k: "stock", label: "Stock", desc: "Matières & production", icon: Boxes },
+    { k: "entrepots", label: "Entrepôts", desc: "Stock par zone & transferts", icon: Truck },
     { k: "clients", label: "Partenaires", desc: "Accès et tarifs", icon: Users },
     { k: "societe", label: "Société", desc: "Infos & sécurité", icon: ShieldCheck },
     ...(isPrincipal ? [{ k: "membres", label: "Membres", desc: "Accès & historique", icon: UserCog, badge: unseenLogins }] : []),
@@ -759,10 +835,19 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
             <StockAdmin
               catalog={catalog} rawMaterials={rawMaterials} addRawMaterial={addRawMaterial}
               updateRawMaterial={updateRawMaterial} deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
-              recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock} flash={flash}
+              recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock}
+              warehouses={warehouses} stockOf={stockOf} flash={flash}
             />
           )}
-          {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} flash={flash} canDelete={isPrincipal} />}
+          {tab === "entrepots" && (
+            <WarehousesAdmin
+              catalog={catalog} warehouses={warehouses} addWarehouse={addWarehouse}
+              renameWarehouse={renameWarehouse} deleteWarehouse={deleteWarehouse}
+              stockOf={stockOf} setStock={setStock} transferStock={transferStock}
+              clients={clients} updateClient={updateClient} flash={flash}
+            />
+          )}
+          {tab === "clients" && <ClientsAdmin clients={clients} addClient={addClient} updateClient={updateClient} deleteClient={deleteClient} orders={orders} catalog={catalog} warehouses={warehouses} flash={flash} canDelete={isPrincipal} />}
           {tab === "societe" && <SocieteAdmin company={company} isPrincipal={isPrincipal} changeAdminPin={changeAdminPin} settings={settings} updateNotificationSettings={updateNotificationSettings} flash={flash} />}
           {tab === "membres" && isPrincipal && (
             <MembresAdmin adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember} activityLog={activityLog} flash={flash} />
@@ -1108,7 +1193,117 @@ function CatalogueAdmin({ catalog, addCatalogItem, updateCatalogItem, deleteCata
   );
 }
 
-function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, catalog, flash, canDelete }) {
+function WarehousesAdmin({ catalog, warehouses, addWarehouse, renameWarehouse, deleteWarehouse, stockOf, setStock, transferStock, clients, updateClient, flash }) {
+  const [newName, setNewName] = useState("");
+  const [activeId, setActiveId] = useState(warehouses[0]?.id || null);
+  const [editQty, setEditQty] = useState({});
+  const [transfer, setTransfer] = useState({ catalogId: "", from: "", to: "", qty: "" });
+
+  useEffect(() => {
+    if (!activeId && warehouses.length > 0) setActiveId(warehouses[0].id);
+  }, [warehouses, activeId]);
+
+  const create = async () => {
+    if (!newName.trim()) return flash("Donne un nom à l'entrepôt (ex : Marrakech)");
+    const row = await addWarehouse(newName);
+    if (row) { setNewName(""); setActiveId(row.id); }
+  };
+
+  const remove = (w) => {
+    if (!window.confirm(`Supprimer l'entrepôt "${w.name}" ? Le stock associé sera perdu.`)) return;
+    deleteWarehouse(w.id);
+    if (activeId === w.id) setActiveId(null);
+  };
+
+  const partnersOf = (warehouseId) => clients.filter((c) => c.warehouse_id === warehouseId);
+
+  const doTransfer = () => {
+    const qty = parseFloat(transfer.qty);
+    if (!transfer.catalogId || !transfer.from || !transfer.to || !qty || qty <= 0) return flash("Complète le transfert : plat, entrepôts, quantité");
+    transferStock(transfer.catalogId, transfer.from, transfer.to, qty);
+    setTransfer({ catalogId: "", from: "", to: "", qty: "" });
+  };
+
+  if (warehouses.length === 0 && !newName) {
+    return (
+      <div>
+        <div style={styles.modalNote}>
+          Aucun entrepôt configuré pour l'instant. Crée-en un premier (ex : "Principal" et "Marrakech") pour séparer le stock par zone géographique.
+          Chaque partenaire pourra ensuite être rattaché à l'entrepôt qui le dessert, et ses commandes déduiront automatiquement le bon stock.
+        </div>
+        <div style={styles.addItemRow}>
+          <input placeholder="Nom de l'entrepôt (ex: Marrakech)" value={newName} onChange={(e) => setNewName(e.target.value)} style={styles.addInput} />
+          <button onClick={create} style={styles.addBtn}><Plus size={16} /> Créer</button>
+        </div>
+      </div>
+    );
+  }
+
+  const active = warehouses.find((w) => w.id === activeId) || warehouses[0];
+
+  return (
+    <div>
+      <div style={styles.addItemRow}>
+        <input placeholder="Nom du nouvel entrepôt" value={newName} onChange={(e) => setNewName(e.target.value)} style={styles.addInput} />
+        <button onClick={create} style={styles.addBtn}><Plus size={16} /> Créer</button>
+      </div>
+
+      <div style={styles.subNavRow}>
+        {warehouses.map((w) => (
+          <button key={w.id} onClick={() => setActiveId(w.id)} style={{ ...styles.subNavBtn, ...(activeId === w.id ? styles.subNavBtnActive : {}) }}>{w.name}</button>
+        ))}
+      </div>
+
+      {active && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "14px 0 6px" }}>
+            <div style={styles.catLabel}>Stock — {active.name}</div>
+            <button onClick={() => remove(active)} style={styles.deleteBtn}><Trash2 size={13} /> Supprimer cet entrepôt</button>
+          </div>
+
+          {partnersOf(active.id).length > 0 && (
+            <div style={styles.orderMeta}>Partenaires rattachés : {partnersOf(active.id).map((c) => c.denomination).join(", ")}</div>
+          )}
+
+          <div style={{ ...styles.catalogueTable, marginTop: 10 }}>
+            {catalog.length === 0 && <div style={styles.emptyState}>Ajoute d'abord des produits au catalogue.</div>}
+            {catalog.map((item) => (
+              <div key={item.id} style={styles.stockRow}>
+                <div style={{ flex: 2, minWidth: 140 }}><div style={styles.catalogueRowName}>{item.name}</div></div>
+                <div style={styles.stockQtyBadge}>{stockOf(item.id, active.id)} en stock</div>
+                <input type="number" placeholder="Nouvelle qté" value={editQty[item.id] ?? ""} onChange={(e) => setEditQty({ ...editQty, [item.id]: e.target.value })} style={{ ...styles.addInput, width: 90, flex: "0 0 90px" }} />
+                <button
+                  onClick={() => { const q = parseFloat(editQty[item.id]); if (!isNaN(q) && q >= 0) { setStock(item.id, active.id, q); setEditQty({ ...editQty, [item.id]: "" }); } }}
+                  style={styles.iconBtnGhost}
+                ><Check size={15} /></button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ ...styles.catLabel, marginTop: 26 }}>Transférer du stock entre entrepôts</div>
+      <div style={styles.addItemRow}>
+        <select value={transfer.catalogId} onChange={(e) => setTransfer({ ...transfer, catalogId: e.target.value })} style={{ ...styles.addInput, flex: 2 }}>
+          <option value="">— Plat —</option>
+          {catalog.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <select value={transfer.from} onChange={(e) => setTransfer({ ...transfer, from: e.target.value })} style={styles.addInput}>
+          <option value="">De —</option>
+          {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+        </select>
+        <select value={transfer.to} onChange={(e) => setTransfer({ ...transfer, to: e.target.value })} style={styles.addInput}>
+          <option value="">Vers —</option>
+          {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+        </select>
+        <input type="number" placeholder="Qté" value={transfer.qty} onChange={(e) => setTransfer({ ...transfer, qty: e.target.value })} style={{ ...styles.addInput, maxWidth: 80 }} />
+        <button onClick={doTransfer} style={styles.addBtn}><Truck size={15} /> Transférer</button>
+      </div>
+    </div>
+  );
+}
+
+function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, catalog, warehouses, flash, canDelete }) {
   const [form, setForm] = useState({ denomination: "", ice: "", address: "", phone: "" });
   const [pricingId, setPricingId] = useState(null);
   const [priceDraft, setPriceDraft] = useState({});
@@ -1124,16 +1319,17 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
       phone: form.phone.trim(),
       code: genCode(),
       prices: {},
+      warehouse_id: form.warehouse_id || null,
     };
     const row = await addClient(client);
-    setForm({ denomination: "", ice: "", address: "", phone: "" });
+    setForm({ denomination: "", ice: "", address: "", phone: "", warehouse_id: "" });
     if (row) flash(`Code créé : ${row.code}`);
   };
   const copyCode = (code) => { try { navigator.clipboard.writeText(code); flash("Code copié"); } catch { flash(code); } };
 
   const startEdit = (c) => { setEditingId(c.id); setEditDraft(c); };
   const saveEdit = () => {
-    updateClient(editingId, { denomination: editDraft.denomination, ice: editDraft.ice, address: editDraft.address, phone: editDraft.phone });
+    updateClient(editingId, { denomination: editDraft.denomination, ice: editDraft.ice, address: editDraft.address, phone: editDraft.phone, warehouse_id: editDraft.warehouse_id || null });
     setEditingId(null);
     flash("Fiche mise à jour");
   };
@@ -1157,6 +1353,12 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
         <input placeholder="ICE (facultatif)" value={form.ice} onChange={(e) => setForm({ ...form, ice: e.target.value })} style={styles.addInput} />
         <input placeholder="Adresse (facultatif)" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} style={styles.addInput} />
         <input placeholder="Téléphone (facultatif)" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} style={styles.addInput} />
+        {warehouses.length > 0 && (
+          <select value={form.warehouse_id || ""} onChange={(e) => setForm({ ...form, warehouse_id: e.target.value })} style={styles.addInput}>
+            <option value="">Entrepôt : Principal (défaut)</option>
+            {warehouses.map((w) => <option key={w.id} value={w.id}>Entrepôt : {w.name}</option>)}
+          </select>
+        )}
         <button onClick={handleAddClient} style={styles.addBtn}><Plus size={16} /> Créer un accès</button>
       </div>
 
@@ -1172,6 +1374,12 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
                 <input value={editDraft.ice || ""} onChange={(e) => setEditDraft({ ...editDraft, ice: e.target.value })} style={styles.addInput} placeholder="ICE" />
                 <input value={editDraft.address || ""} onChange={(e) => setEditDraft({ ...editDraft, address: e.target.value })} style={styles.addInput} placeholder="Adresse" />
                 <input value={editDraft.phone || ""} onChange={(e) => setEditDraft({ ...editDraft, phone: e.target.value })} style={styles.addInput} placeholder="Téléphone" />
+                {warehouses.length > 0 && (
+                  <select value={editDraft.warehouse_id || ""} onChange={(e) => setEditDraft({ ...editDraft, warehouse_id: e.target.value })} style={styles.addInput}>
+                    <option value="">Entrepôt : Principal (défaut)</option>
+                    {warehouses.map((w) => <option key={w.id} value={w.id}>Entrepôt : {w.name}</option>)}
+                  </select>
+                )}
                 <button onClick={saveEdit} style={styles.primaryBtnSmall}>Enregistrer</button>
               </div>
             );
@@ -1183,6 +1391,7 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
                 <div style={styles.orderMeta}>
                   {c.ice ? `ICE ${c.ice}` : "ICE non renseigné"} · {count} commande{count > 1 ? "s" : ""}
                   {customCount > 0 && ` · ${customCount} tarif${customCount > 1 ? "s" : ""} spécifique${customCount > 1 ? "s" : ""}`}
+                  {warehouses.length > 0 && ` · Entrepôt : ${warehouses.find((w) => w.id === c.warehouse_id)?.name || "Principal"}`}
                 </div>
               </div>
               <button onClick={() => startEdit(c)} style={styles.iconBtnGhost}><Pencil size={13} /></button>
@@ -1224,7 +1433,7 @@ function ClientsAdmin({ clients, addClient, updateClient, deleteClient, orders, 
   );
 }
 
-function StockAdmin({ catalog, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, flash }) {
+function StockAdmin({ catalog, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, warehouses, stockOf, flash }) {
   const [sub, setSub] = useState("vue");
 
   const costOf = (catalogId) => {
@@ -1247,15 +1456,16 @@ function StockAdmin({ catalog, rawMaterials, addRawMaterial, updateRawMaterial, 
         ))}
       </div>
 
-      {sub === "vue" && <StockOverview catalog={catalog} rawMaterials={rawMaterials} costOf={costOf} produceStock={produceStock} />}
+      {sub === "vue" && <StockOverview catalog={catalog} rawMaterials={rawMaterials} costOf={costOf} produceStock={produceStock} warehouses={warehouses} stockOf={stockOf} />}
       {sub === "matieres" && <RawMaterialsAdmin rawMaterials={rawMaterials} addRawMaterial={addRawMaterial} updateRawMaterial={updateRawMaterial} deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial} flash={flash} />}
       {sub === "recettes" && <RecipesAdmin catalog={catalog} rawMaterials={rawMaterials} recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} costOf={costOf} flash={flash} />}
     </div>
   );
 }
 
-function StockOverview({ catalog, rawMaterials, costOf, produceStock }) {
+function StockOverview({ catalog, rawMaterials, costOf, produceStock, warehouses, stockOf }) {
   const [prodQty, setProdQty] = useState({});
+  const [prodWarehouse, setProdWarehouse] = useState(warehouses[0]?.id || "");
   const lowStock = rawMaterials.filter((m) => Number(m.stock_quantity) <= Number(m.alert_threshold || 0));
 
   return (
@@ -1267,6 +1477,15 @@ function StockOverview({ catalog, rawMaterials, costOf, produceStock }) {
         </div>
       )}
 
+      {warehouses.length > 0 && (
+        <div style={styles.modalNote}>
+          Plusieurs entrepôts sont configurés — la production ci-dessous alimente l'entrepôt choisi ici. Gère le détail et les transferts entre zones dans l'onglet <b>Entrepôts</b>.
+          <select value={prodWarehouse} onChange={(e) => setProdWarehouse(e.target.value)} style={{ ...styles.addInput, width: "100%", marginTop: 8 }}>
+            {warehouses.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+          </select>
+        </div>
+      )}
+
       <div style={styles.catLabel}>Stock produits finis</div>
       <div style={styles.catalogueTable}>
         {catalog.length === 0 && <div style={styles.emptyState}>Ajoute d'abord des produits au catalogue.</div>}
@@ -1274,6 +1493,9 @@ function StockOverview({ catalog, rawMaterials, costOf, produceStock }) {
           const cost = costOf(item.id);
           const price = Number(item.price);
           const margin = price - cost;
+          const qtyDisplay = warehouses.length > 0
+            ? warehouses.reduce((sum, w) => sum + stockOf(item.id, w.id), 0)
+            : Number(item.stock_quantity || 0);
           return (
             <div key={item.id} style={styles.stockRow}>
               <div style={{ flex: 2, minWidth: 140 }}>
@@ -1282,9 +1504,9 @@ function StockOverview({ catalog, rawMaterials, costOf, produceStock }) {
                   Coût {cost.toFixed(2)} DH · Prix {price.toFixed(2)} DH · Marge {margin.toFixed(2)} DH
                 </div>
               </div>
-              <div style={styles.stockQtyBadge}>{Number(item.stock_quantity || 0)} en stock</div>
+              <div style={styles.stockQtyBadge}>{qtyDisplay} en stock{warehouses.length > 0 ? " (tous entrepôts)" : ""}</div>
               <input type="number" placeholder="Qté produite" value={prodQty[item.id] || ""} onChange={(e) => setProdQty({ ...prodQty, [item.id]: e.target.value })} style={{ ...styles.addInput, width: 90, flex: "0 0 90px" }} />
-              <button onClick={() => { const q = parseFloat(prodQty[item.id]); if (q > 0) { produceStock(item, q); setProdQty({ ...prodQty, [item.id]: "" }); } }} style={styles.addBtn}>
+              <button onClick={() => { const q = parseFloat(prodQty[item.id]); if (q > 0) { produceStock(item, q, warehouses.length > 0 ? prodWarehouse : null); setProdQty({ ...prodQty, [item.id]: "" }); } }} style={styles.addBtn}>
                 <PackagePlus size={15} /> Produire
               </button>
             </div>
