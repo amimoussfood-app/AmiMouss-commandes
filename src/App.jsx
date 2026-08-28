@@ -214,6 +214,7 @@ export default function App() {
   const [rawMaterials, setRawMaterials] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
   const [catalogStock, setCatalogStock] = useState([]);
+  const [stockMovements, setStockMovements] = useState([]);
   const [recipeItems, setRecipeItems] = useState([]);
   const [adminUsers, setAdminUsers] = useState([]);
   const [activityLog, setActivityLog] = useState([]);
@@ -267,7 +268,7 @@ export default function App() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [cat, cl, ord, set, comp, rm, ri, au, al, wh, cs] = await Promise.all([
+      const [cat, cl, ord, set, comp, rm, ri, au, al, wh, cs, sm] = await Promise.all([
         sbSelect("catalog"),
         sbSelect("clients"),
         sbSelect("orders", "select=*&order=date.desc"),
@@ -279,6 +280,7 @@ export default function App() {
         sbSelect("activity_log", "select=*&order=created_at.desc&limit=200"),
         sbSelect("warehouses").catch(() => []),
         sbSelect("catalog_stock").catch(() => []),
+        sbSelect("stock_movements", "select=*&order=created_at.desc&limit=200").catch(() => []),
       ]);
       setCatalog(cat || []);
       setClients(cl || []);
@@ -291,6 +293,7 @@ export default function App() {
       setActivityLog(al || []);
       setWarehouses(wh || []);
       setCatalogStock(cs || []);
+      setStockMovements(sm || []);
       setLoadError(false);
     } catch (e) {
       setLoadError(true);
@@ -461,6 +464,14 @@ export default function App() {
     } catch { flash("Échec de l'enregistrement de la recette"); }
   };
 
+  // ---- journal des mouvements de stock ----
+  const logMovement = async (catalogId, quantity, reason, warehouseId) => {
+    try {
+      const row = await sbInsert("stock_movements", { catalog_id: catalogId, quantity, reason, warehouse_id: warehouseId || null });
+      setStockMovements((m) => [row, ...m]);
+    } catch { /* table pas encore créée : on ignore silencieusement */ }
+  };
+
   // ---- entrepôts (multi-stock) ----
   const addWarehouse = async (name) => {
     try {
@@ -505,6 +516,8 @@ export default function App() {
     if (fromQty < qty) return flash("Stock insuffisant dans l'entrepôt source");
     await setStock(catalogId, fromWarehouseId, fromQty - qty);
     await setStock(catalogId, toWarehouseId, toQty + qty);
+    logMovement(catalogId, -Number(qty), "Transfert sortant", fromWarehouseId);
+    logMovement(catalogId, Number(qty), "Transfert entrant", toWarehouseId);
     flash(`${qty} unité(s) transférée(s)`);
   };
 
@@ -525,10 +538,12 @@ export default function App() {
       if (warehouseId) {
         // Multi-entrepôts actif : le produit fini rejoint le stock de l'entrepôt choisi
         await setStock(catalogItem.id, warehouseId, stockOf(catalogItem.id, warehouseId) + Number(qty));
+        logMovement(catalogItem.id, Number(qty), "Production", warehouseId);
       } else {
         // Pas encore d'entrepôts configurés : comportement d'origine (stock global)
         const newStock = Number(catalogItem.stock_quantity || 0) + Number(qty);
         await updateCatalogItem(catalogItem.id, { stock_quantity: newStock });
+        logMovement(catalogItem.id, Number(qty), "Production", null);
       }
       flash(`${qty} unité(s) de ${catalogItem.name} ajoutée(s) au stock`);
     } catch { flash("Échec de la production"); }
@@ -575,6 +590,7 @@ export default function App() {
             const current = stockOf(catItem.id, targetWarehouseId);
             const newFinished = current - Number(line.qty);
             await setStock(catItem.id, targetWarehouseId, newFinished);
+            logMovement(catItem.id, -Number(line.qty), "Vente", targetWarehouseId);
             if (settings.whatsapp_notify_stock && newFinished <= 0 && current > 0) {
               const whName = warehouses.find((w) => w.id === targetWarehouseId)?.name || "";
               sendWhatsAppAlert(settings, `⚠️ Stock critique — "${catItem.name}" (${whName}) : ${newFinished} en stock.`);
@@ -584,6 +600,7 @@ export default function App() {
             try {
               const patched = await sbUpdate("catalog", catItem.id, { stock_quantity: newFinished });
               setCatalog((c) => c.map((i) => (i.id === catItem.id ? patched : i)));
+              logMovement(catItem.id, -Number(line.qty), "Vente", null);
               if (settings.whatsapp_notify_stock && newFinished <= 0 && Number(catItem.stock_quantity || 0) > 0) {
                 sendWhatsAppAlert(settings, `⚠️ Stock critique — "${catItem.name}" : ${newFinished} en stock.`);
               }
@@ -800,7 +817,8 @@ export default function App() {
           deleteRawMaterial={deleteRawMaterial} restockRawMaterial={restockRawMaterial}
           recipeItems={recipeItems} setRecipeForCatalogItem={setRecipeForCatalogItem} produceStock={produceStock}
           warehouses={warehouses} addWarehouse={addWarehouse} renameWarehouse={renameWarehouse} deleteWarehouse={deleteWarehouse}
-          catalogStock={catalogStock} stockOf={stockOf} setStock={setStock} transferStock={transferStock}
+          catalogStock={catalogStock} stockOf={stockOf} setStock={setStock} transferStock={transferStock} logMovement={logMovement}
+          stockMovements={stockMovements}
           adminUsers={adminUsers} addAdminMember={addAdminMember} deleteAdminMember={deleteAdminMember}
           changeAdminPin={changeAdminPin} activityLog={activityLog} unseenLogins={unseenLogins} markActivitySeen={markActivitySeen}
           settings={settings} updateNotificationSettings={updateNotificationSettings}
@@ -878,7 +896,71 @@ function ClientLoginScreen({ value, onChange, onSubmit, onAdminAccess, error, co
 }
 
 // ==================== ADMIN APP ====================
-function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, addOrder, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, warehouses, addWarehouse, renameWarehouse, deleteWarehouse, catalogStock, stockOf, setStock, transferStock, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
+function DashboardHome({ company, orders, clients }) {
+  const today = new Date();
+  const invoiced = orders.filter((o) => o.factureNumber);
+  const revenueTotal = invoiced.reduce((s, o) => s + o.total, 0);
+  const pending = orders.filter((o) => o.status !== "livree").length;
+  const thisMonthCount = invoiced.filter((o) => {
+    const d = new Date(o.factureDate || o.date);
+    return d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear();
+  }).length;
+  const activeClients = new Set(orders.map((o) => o.clientId)).size;
+  const dateStr = today.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const dateCap = dateStr.charAt(0).toUpperCase() + dateStr.slice(1);
+
+  return (
+    <div style={styles.dashWrap}>
+      <div style={styles.dashHero}>
+        <div style={styles.dashHeroTitle}>Bienvenue, {company.name} !</div>
+        <div style={styles.dashHeroSub}>Voici un aperçu de ton activité.</div>
+        <div style={styles.dashDateBadge}>
+          <ClipboardList size={15} />
+          <div>
+            <div style={styles.dashDateLabel}>Aujourd'hui</div>
+            <div style={styles.dashDateVal}>{dateCap}</div>
+          </div>
+        </div>
+      </div>
+      <div style={styles.dashStatsGrid}>
+        <div style={styles.dashStatCard}>
+          <div style={{ ...styles.dashStatIcon, background: "rgba(47,169,104,0.15)", color: "#2FA968" }}>DH</div>
+          <div>
+            <div style={styles.dashStatLabel}>Revenu total</div>
+            <div style={styles.dashStatVal}>{revenueTotal.toFixed(0)} DH</div>
+            <div style={styles.dashStatCaption}>Sur toutes les factures émises</div>
+          </div>
+        </div>
+        <div style={styles.dashStatCard}>
+          <div style={{ ...styles.dashStatIcon, background: "rgba(201,161,90,0.15)", color: "#C9A15A" }}><Clock size={18} /></div>
+          <div>
+            <div style={styles.dashStatLabel}>Commandes en attente</div>
+            <div style={styles.dashStatVal}>{pending}</div>
+            <div style={styles.dashStatCaption}>Non encore livrées</div>
+          </div>
+        </div>
+        <div style={styles.dashStatCard}>
+          <div style={{ ...styles.dashStatIcon, background: "rgba(139,147,160,0.15)", color: "#8B93A0" }}><FileText size={18} /></div>
+          <div>
+            <div style={styles.dashStatLabel}>Factures ce mois</div>
+            <div style={styles.dashStatVal}>{thisMonthCount}</div>
+            <div style={styles.dashStatCaption}>{today.toLocaleDateString("fr-FR", { month: "long" })}</div>
+          </div>
+        </div>
+        <div style={styles.dashStatCard}>
+          <div style={{ ...styles.dashStatIcon, background: "rgba(47,169,104,0.15)", color: "#2FA968" }}><Users size={18} /></div>
+          <div>
+            <div style={styles.dashStatLabel}>Partenaires actifs</div>
+            <div style={styles.dashStatVal}>{activeClients}</div>
+            <div style={styles.dashStatCaption}>Sur {clients.length} au total</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalogItem, deleteCatalogItem, orders, updateOrder, deleteOrder, generateFacture, addOrder, clients, addClient, updateClient, deleteClient, unseenCount, markAllSeen, rawMaterials, addRawMaterial, updateRawMaterial, deleteRawMaterial, restockRawMaterial, recipeItems, setRecipeForCatalogItem, produceStock, warehouses, addWarehouse, renameWarehouse, deleteWarehouse, catalogStock, stockOf, setStock, transferStock, logMovement, stockMovements, adminUsers, addAdminMember, deleteAdminMember, changeAdminPin, activityLog, unseenLogins, markActivitySeen, settings, updateNotificationSettings, onLogout, flash }) {
   const [tab, setTab] = useState("home");
   const isPrincipal = currentAdmin?.role === "principal";
 
@@ -918,6 +1000,7 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
 
       {tab === "home" ? (
         <main style={styles.main}>
+          <DashboardHome company={company} orders={orders} clients={clients} />
           <div style={styles.moduleGrid}>
             {modules.map((m) => (
               <button key={m.k} onClick={() => openTab(m.k)} style={styles.moduleCard}>
@@ -945,7 +1028,8 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
             <WarehousesAdmin
               catalog={catalog} warehouses={warehouses} addWarehouse={addWarehouse}
               renameWarehouse={renameWarehouse} deleteWarehouse={deleteWarehouse}
-              stockOf={stockOf} setStock={setStock} transferStock={transferStock}
+              stockOf={stockOf} setStock={setStock} transferStock={transferStock} logMovement={logMovement}
+              stockMovements={stockMovements}
               clients={clients} updateClient={updateClient} flash={flash}
             />
           )}
@@ -963,6 +1047,10 @@ function AdminApp({ company, currentAdmin, catalog, addCatalogItem, updateCatalo
 function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFacture, addOrder, catalog, clients, flash }) {
   const [docView, setDocView] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showExport, setShowExport] = useState(false);
+  const [exportFrom, setExportFrom] = useState("");
+  const [exportTo, setExportTo] = useState("");
+  const [printPreview, setPrintPreview] = useState(false);
 
   const cycleStatus = (o) => {
     const keys = Object.keys(STATUS);
@@ -971,9 +1059,67 @@ function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFactur
   };
   const clientOf = (o) => clients.find((c) => c.id === o.clientId);
 
+  const invoicesInRange = () => {
+    if (!exportFrom || !exportTo) return [];
+    const from = new Date(exportFrom); from.setHours(0, 0, 0, 0);
+    const to = new Date(exportTo); to.setHours(23, 59, 59, 999);
+    return orders
+      .filter((o) => o.factureNumber && o.factureDate)
+      .filter((o) => { const d = new Date(o.factureDate); return d >= from && d <= to; })
+      .sort((a, b) => new Date(a.factureDate) - new Date(b.factureDate));
+  };
+
+  const downloadCsv = () => {
+    const list = invoicesInRange();
+    if (list.length === 0) return flash("Aucune facture dans cette période");
+    const rows = [["N° Facture", "Date", "Partenaire", "Total TTC (DH)", "TVA"]];
+    list.forEach((o) => {
+      const client = clientOf(o);
+      rows.push([
+        o.factureNumber,
+        new Date(o.factureDate).toLocaleDateString("fr-FR"),
+        o.denomination || client?.denomination || "",
+        o.total.toFixed(2),
+        o.vatIncluded ? "20%" : "0%",
+      ]);
+    });
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(";")).join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `factures_${exportFrom}_au_${exportTo}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    flash(`${list.length} facture(s) exportée(s)`);
+  };
+
   return (
     <div style={styles.historyList}>
       <button onClick={() => setShowCreate(true)} style={styles.addBtn}><Plus size={16} /> Nouvelle commande / facture</button>
+
+      <button onClick={() => setShowExport((v) => !v)} style={{ ...styles.docBtn, marginTop: 10 }}>
+        <FileText size={13} /> Exporter les factures par période
+      </button>
+      {showExport && (
+        <div style={styles.exportBox}>
+          <div style={styles.addItemRow}>
+            <div style={{ flex: 1 }}>
+              <div style={styles.reorderHint}>Du</div>
+              <input type="date" value={exportFrom} onChange={(e) => setExportFrom(e.target.value)} style={styles.addInput} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={styles.reorderHint}>Au</div>
+              <input type="date" value={exportTo} onChange={(e) => setExportTo(e.target.value)} style={styles.addInput} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+            <button onClick={downloadCsv} style={styles.addBtn}><FileText size={14} /> Télécharger en CSV / Excel</button>
+            <button onClick={() => setPrintPreview(true)} style={styles.docBtn}><Printer size={13} /> Aperçu & impression</button>
+          </div>
+        </div>
+      )}
+
       {orders.length === 0 && <div style={styles.emptyState}>Aucune commande pour le moment.</div>}
       {orders.map((o) => {
         const st = STATUS[o.status];
@@ -1027,6 +1173,70 @@ function OrdersAdmin({ company, orders, updateOrder, deleteOrder, generateFactur
           onClose={() => setShowCreate(false)}
         />
       )}
+      {printPreview && (
+        <ExportInvoicesModal company={company} invoices={invoicesInRange()} from={exportFrom} to={exportTo} onClose={() => setPrintPreview(false)} />
+      )}
+    </div>
+  );
+}
+
+function ExportInvoicesModal({ company, invoices, from, to, onClose }) {
+  const total = invoices.reduce((s, o) => s + o.total, 0);
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.docModalBox} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.docModalActions}>
+          <button onClick={() => window.print()} style={styles.printBtn}><Printer size={14} /> Imprimer / PDF</button>
+          <button onClick={onClose} style={styles.iconBtnGhost}><X size={20} /></button>
+        </div>
+        <div id="print-area" style={styles.docPaper}>
+          <div style={styles.docHead}>
+            <div style={styles.docHeadLeft}>
+              <img src={DOC_LOGO} alt="" style={styles.docLogo} />
+              <div style={styles.docCompanyBlock}>
+                <div style={styles.docCompanyName}>{company.name}</div>
+                <div style={styles.docCompanyLine}>{company.address}</div>
+              </div>
+            </div>
+            <div style={styles.docHeadRight}>
+              <div style={styles.docTitleGreen}>RÉCAPITULATIF</div>
+              <div style={styles.docNumberBold}>Factures</div>
+              <div style={styles.docDateLine}>
+                Du <b>{from ? new Date(from).toLocaleDateString("fr-FR") : "—"}</b> au <b>{to ? new Date(to).toLocaleDateString("fr-FR") : "—"}</b>
+              </div>
+            </div>
+          </div>
+
+          <table style={styles.docTable}>
+            <thead>
+              <tr>
+                <th style={styles.docThGreen}>N° Facture</th>
+                <th style={styles.docThGreen}>Date</th>
+                <th style={styles.docThGreen}>Partenaire</th>
+                <th style={{ ...styles.docThGreen, textAlign: "right" }}>Total TTC</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoices.length === 0 && (
+                <tr><td style={styles.docTd} colSpan={4}>Aucune facture sur cette période.</td></tr>
+              )}
+              {invoices.map((o) => (
+                <tr key={o.id}>
+                  <td style={styles.docTd}>{o.factureNumber}</td>
+                  <td style={styles.docTd}>{new Date(o.factureDate).toLocaleDateString("fr-FR")}</td>
+                  <td style={styles.docTd}>{o.denomination || "—"}</td>
+                  <td style={{ ...styles.docTd, textAlign: "right" }}>{o.total.toFixed(2)} DH</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div style={styles.docNetPay}>
+            <span>Total période</span><span>{total.toFixed(2)} DH</span>
+          </div>
+          <div style={styles.docFooter}>{invoices.length} facture(s) sur la période sélectionnée.</div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1295,11 +1505,13 @@ function CatalogueAdmin({ catalog, addCatalogItem, updateCatalogItem, deleteCata
   );
 }
 
-function WarehousesAdmin({ catalog, warehouses, addWarehouse, renameWarehouse, deleteWarehouse, stockOf, setStock, transferStock, clients, updateClient, flash }) {
+function WarehousesAdmin({ catalog, warehouses, addWarehouse, renameWarehouse, deleteWarehouse, stockOf, setStock, transferStock, logMovement, stockMovements, clients, updateClient, flash }) {
   const [newName, setNewName] = useState("");
   const [activeId, setActiveId] = useState(warehouses[0]?.id || null);
   const [editQty, setEditQty] = useState({});
   const [transfer, setTransfer] = useState({ catalogId: "", from: "", to: "", qty: "" });
+  const [movPage, setMovPage] = useState(0);
+  const MOV_PER_PAGE = 7;
 
   useEffect(() => {
     if (!activeId && warehouses.length > 0) setActiveId(warehouses[0].id);
@@ -1375,7 +1587,15 @@ function WarehousesAdmin({ catalog, warehouses, addWarehouse, renameWarehouse, d
                 <div style={styles.stockQtyBadge}>{stockOf(item.id, active.id)} en stock</div>
                 <input type="number" placeholder="Nouvelle qté" value={editQty[item.id] ?? ""} onChange={(e) => setEditQty({ ...editQty, [item.id]: e.target.value })} style={{ ...styles.addInput, width: 90, flex: "0 0 90px" }} />
                 <button
-                  onClick={() => { const q = parseFloat(editQty[item.id]); if (!isNaN(q) && q >= 0) { setStock(item.id, active.id, q); setEditQty({ ...editQty, [item.id]: "" }); } }}
+                  onClick={() => {
+                    const q = parseFloat(editQty[item.id]);
+                    if (!isNaN(q) && q >= 0) {
+                      const delta = q - stockOf(item.id, active.id);
+                      setStock(item.id, active.id, q);
+                      if (delta !== 0) logMovement(item.id, delta, "Ajustement manuel", active.id);
+                      setEditQty({ ...editQty, [item.id]: "" });
+                    }
+                  }}
                   style={styles.iconBtnGhost}
                 ><Check size={15} /></button>
               </div>
@@ -1400,6 +1620,39 @@ function WarehousesAdmin({ catalog, warehouses, addWarehouse, renameWarehouse, d
         </select>
         <input type="number" placeholder="Qté" value={transfer.qty} onChange={(e) => setTransfer({ ...transfer, qty: e.target.value })} style={{ ...styles.addInput, maxWidth: 80 }} />
         <button onClick={doTransfer} style={styles.addBtn}><Truck size={15} /> Transférer</button>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 30 }}>
+        <div style={styles.catLabel}>Derniers mouvements</div>
+        {stockMovements.length > MOV_PER_PAGE && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button onClick={() => setMovPage((p) => Math.max(0, p - 1))} disabled={movPage === 0} style={styles.iconBtnGhost}><ArrowLeft size={14} /></button>
+            <span style={styles.orderMeta}>{movPage + 1} / {Math.ceil(stockMovements.length / MOV_PER_PAGE)}</span>
+            <button onClick={() => setMovPage((p) => Math.min(Math.ceil(stockMovements.length / MOV_PER_PAGE) - 1, p + 1))} disabled={(movPage + 1) * MOV_PER_PAGE >= stockMovements.length} style={{ ...styles.iconBtnGhost, transform: "scaleX(-1)" }}><ArrowLeft size={14} /></button>
+          </div>
+        )}
+      </div>
+      <div style={{ ...styles.catalogueTable, marginTop: 8 }}>
+        {stockMovements.length === 0 && <div style={styles.emptyState}>Aucun mouvement enregistré pour l'instant.</div>}
+        {stockMovements.slice(movPage * MOV_PER_PAGE, movPage * MOV_PER_PAGE + MOV_PER_PAGE).map((m) => {
+          const item = catalog.find((c) => c.id === m.catalog_id);
+          const wh = warehouses.find((w) => w.id === m.warehouse_id);
+          const positive = Number(m.quantity) > 0;
+          return (
+            <div key={m.id} style={styles.movRow}>
+              <div style={{ ...styles.movIcon, background: positive ? "rgba(47,169,104,0.15)" : "rgba(201,90,90,0.15)", color: positive ? "#2FA968" : "#C95A5A" }}>
+                {positive ? "↗" : "↙"}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={styles.catalogueRowName}>{item?.name || "Plat supprimé"}</div>
+                <div style={styles.orderMeta}>
+                  {new Date(m.created_at).toLocaleDateString("fr-FR")} · {m.reason}{wh ? ` · ${wh.name}` : ""}
+                </div>
+              </div>
+              <div style={{ fontWeight: 700, color: positive ? "#2FA968" : "#C95A5A" }}>{positive ? "+" : ""}{Number(m.quantity)}</div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -2398,6 +2651,9 @@ const styles = {
   addBtn: { background: C.gold, color: "#1A1508", border: "none", borderRadius: 8, padding: "10px 14px", fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, cursor: "pointer" },
   catalogueTable: { display: "flex", flexDirection: "column", gap: 6 },
   reorderHint: { fontSize: 11.5, color: "var(--c-textfaint)", marginBottom: 8 },
+  exportBox: { background: "var(--c-surfacealt)", border: `1px solid var(--c-border)`, borderRadius: 12, padding: 14, marginTop: 10, marginBottom: 6 },
+  movRow: { display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 10, padding: "10px 13px" },
+  movIcon: { width: 30, height: 30, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 },
   rememberRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--c-textmuted)", margin: "10px 0 4px", cursor: "pointer" },
   themeToggle: {
     position: "fixed", bottom: 16, right: 16, zIndex: 50,
@@ -2406,6 +2662,23 @@ const styles = {
     display: "flex", alignItems: "center", justifyContent: "center",
     boxShadow: "0 2px 10px rgba(0,0,0,0.25)", cursor: "pointer",
   },
+  dashWrap: { marginBottom: 22 },
+  dashHero: {
+    borderRadius: 16, padding: "22px 22px 18px", marginBottom: 16,
+    background: "radial-gradient(circle at 100% 0%, #2E6B4C 0%, #1E4A35 65%)",
+    color: "#fff", position: "relative", overflow: "hidden",
+  },
+  dashHeroTitle: { fontFamily: "'Fraunces', serif", fontWeight: 700, fontSize: 19, marginBottom: 4 },
+  dashHeroSub: { fontSize: 13, opacity: 0.85, marginBottom: 16 },
+  dashDateBadge: { display: "flex", alignItems: "center", gap: 10, background: "rgba(255,255,255,0.14)", borderRadius: 10, padding: "9px 13px", width: "fit-content" },
+  dashDateLabel: { fontSize: 9.5, textTransform: "uppercase", letterSpacing: 1, opacity: 0.8, fontWeight: 700 },
+  dashDateVal: { fontSize: 13, fontWeight: 700 },
+  dashStatsGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+  dashStatCard: { background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 14, padding: "14px", display: "flex", alignItems: "flex-start", gap: 11 },
+  dashStatIcon: { width: 38, height: 38, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 12, flexShrink: 0 },
+  dashStatLabel: { fontSize: 11.5, color: "var(--c-textmuted)", fontWeight: 600 },
+  dashStatVal: { fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 19, margin: "2px 0" },
+  dashStatCaption: { fontSize: 10.5, color: "var(--c-textfaint)" },
   catalogueRow: { display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 10, padding: "11px 13px" },
   clientRow: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 10, padding: "11px 13px" },
   activityRow: { display: "flex", alignItems: "center", gap: 10, background: "var(--c-surface)", border: `1px solid var(--c-border)`, borderRadius: 9, padding: "9px 12px" },
