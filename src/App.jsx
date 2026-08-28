@@ -88,6 +88,51 @@ const genCode = () => {
 };
 const pad = (n) => String(n).padStart(4, "0");
 
+// Conversion d'un nombre en toutes lettres (français), pour "Arrêté la présente facture à la somme de..."
+const FR_UNITS = ["", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix", "onze", "douze", "treize", "quatorze", "quinze", "seize", "dix-sept", "dix-huit", "dix-neuf"];
+const FR_TENS = ["", "", "vingt", "trente", "quarante", "cinquante", "soixante"];
+const frTwoDigits = (num) => {
+  if (num < 20) return FR_UNITS[num];
+  if (num < 70) {
+    const t = Math.floor(num / 10), u = num % 10;
+    if (u === 0) return FR_TENS[t];
+    if (u === 1) return FR_TENS[t] + "-et-un";
+    return FR_TENS[t] + "-" + FR_UNITS[u];
+  }
+  if (num < 80) {
+    const u = num - 60;
+    return u === 11 ? "soixante-et-onze" : "soixante-" + FR_UNITS[u];
+  }
+  const u = num - 80;
+  return u === 0 ? "quatre-vingts" : "quatre-vingt-" + FR_UNITS[u];
+};
+const frThreeDigits = (num, noPlural) => {
+  const h = Math.floor(num / 100), rest = num % 100;
+  let out = "";
+  if (h > 0) out += (h === 1 ? "cent" : FR_UNITS[h] + " cent") + (h > 1 && rest === 0 && !noPlural ? "s" : "");
+  if (rest > 0) out += (out ? " " : "") + frTwoDigits(rest);
+  return out;
+};
+const numberToFrenchWords = (n) => {
+  n = Math.floor(n);
+  if (n === 0) return "zéro";
+  let out = "";
+  const millions = Math.floor(n / 1000000), thousands = Math.floor((n % 1000000) / 1000), rest = n % 1000;
+  if (millions > 0) out += millions === 1 ? "un million" : frThreeDigits(millions, true) + " millions";
+  if (thousands > 0) out += (out ? " " : "") + (thousands === 1 ? "mille" : frThreeDigits(thousands, true) + " mille");
+  if (rest > 0) out += (out ? " " : "") + frThreeDigits(rest);
+  return out;
+};
+const amountToFrenchWords = (amount) => {
+  const dh = Math.floor(amount);
+  const centimes = Math.round((amount - dh) * 100);
+  let words = numberToFrenchWords(dh);
+  words = words.charAt(0).toUpperCase() + words.slice(1);
+  words += dh > 1 ? " dirhams" : " dirham";
+  if (centimes > 0) words += ` et ${numberToFrenchWords(centimes)} centime${centimes > 1 ? "s" : ""}`;
+  return words;
+};
+
 // Trie une liste par sort_order (avec repli sur la date de création si absent)
 const sortByOrder = (list) =>
   [...list].sort((a, b) => {
@@ -1877,7 +1922,13 @@ function DocumentModal({ company, order, type, client, onClose, onToggleVat }) {
   const docTitle = isFacture ? "FACTURE" : "BON DE LIVRAISON";
   const docNumber = isFacture ? order.factureNumber : order.blNumber;
   const docDate = isFacture ? order.factureDate : order.date;
-  const vatAmount = order.total - order.total / 1.2;
+  const withVat = isFacture && order.vatIncluded;
+  const totalHT = withVat ? order.total / 1.2 : order.total;
+  const totalTVA = withVat ? order.total - totalHT : 0;
+  const clientName = order.denomination || client?.denomination || "—";
+  const clientIce = order.ice || client?.ice;
+  const clientAddress = order.address || client?.address;
+  const clientPhone = order.phone || client?.phone;
 
   return (
     <div style={styles.modalOverlay} onClick={onClose}>
@@ -1895,37 +1946,39 @@ function DocumentModal({ company, order, type, client, onClose, onToggleVat }) {
         </div>
         <div id="print-area" style={styles.docPaper}>
           <div style={styles.docHead}>
-            <img src={DOC_LOGO} alt="" style={styles.docLogo} />
-            <div style={styles.docCompanyBlock}>
-              <div style={styles.docCompanyName}>{company.name}</div>
-              <div style={styles.docCompanyLine}>{company.address}</div>
-              <div style={styles.docCompanyLine}>ICE {company.ice} · RC {company.rc}</div>
-              <div style={styles.docCompanyLine}>{company.phone} · {company.email}</div>
+            <div style={styles.docHeadLeft}>
+              <img src={DOC_LOGO} alt="" style={styles.docLogo} />
+              <div style={styles.docCompanyBlock}>
+                <div style={styles.docCompanyName}>{company.name}</div>
+                <div style={styles.docCompanyLine}>{company.address}</div>
+                <div style={styles.docCompanyLine}>{company.phone} {company.email && `| ${company.email}`}</div>
+              </div>
+            </div>
+            <div style={styles.docHeadRight}>
+              <div style={styles.docTitleGreen}>{docTitle}</div>
+              <div style={styles.docNumberBold}>N° {docNumber || "—"}</div>
+              <div style={styles.docDateLine}>Date : <b>{docDate ? new Date(docDate).toLocaleDateString("fr-FR") : "—"}</b></div>
             </div>
           </div>
-          <div style={styles.docTitleRow}>
-            <div>
-              <div style={styles.docTitle}>{docTitle}</div>
-              <div style={styles.docNumber}>N° {docNumber || "—"}</div>
-            </div>
-            <div style={styles.docDate}>
-              {docDate ? new Date(docDate).toLocaleDateString("fr-FR", { day: "2-digit", month: "long", year: "numeric" }) : "—"}
+
+          <div style={styles.docAddresseeWrap}>
+            <div style={styles.docAddresseeBox}>
+              <div style={styles.docClientLabel}>Adressé à</div>
+              <div style={styles.docClientName}>{clientName}</div>
+              {clientAddress && <div style={styles.docCompanyLine}>{clientAddress}</div>}
+              {clientPhone && <div style={styles.docCompanyLine}>{clientPhone}</div>}
+              {clientIce && <div style={styles.docCompanyLine}>ICE: {clientIce}</div>}
             </div>
           </div>
-          <div style={styles.docClientBlock}>
-            <div style={styles.docClientLabel}>Client</div>
-            <div style={styles.docClientName}>{order.denomination || client?.denomination || "—"}</div>
-            {(order.ice || client?.ice) && <div style={styles.docCompanyLine}>ICE {order.ice || client?.ice}</div>}
-            {(order.address || client?.address) && <div style={styles.docCompanyLine}>{order.address || client?.address}</div>}
-            {(order.phone || client?.phone) && <div style={styles.docCompanyLine}>{order.phone || client?.phone}</div>}
-          </div>
+
           <table style={styles.docTable}>
             <thead>
               <tr>
-                <th style={styles.docTh}>Désignation</th>
-                <th style={{ ...styles.docTh, textAlign: "center" }}>Qté</th>
-                <th style={{ ...styles.docTh, textAlign: "right" }}>P.U.</th>
-                <th style={{ ...styles.docTh, textAlign: "right" }}>Total</th>
+                <th style={styles.docThGreen}>Désignation</th>
+                <th style={{ ...styles.docThGreen, textAlign: "center" }}>Qté</th>
+                <th style={{ ...styles.docThGreen, textAlign: "right" }}>P.U.</th>
+                {isFacture && <th style={{ ...styles.docThGreen, textAlign: "center" }}>TVA</th>}
+                <th style={{ ...styles.docThGreen, textAlign: "right" }}>Total</th>
               </tr>
             </thead>
             <tbody>
@@ -1934,21 +1987,32 @@ function DocumentModal({ company, order, type, client, onClose, onToggleVat }) {
                   <td style={styles.docTd}>{it.name}</td>
                   <td style={{ ...styles.docTd, textAlign: "center" }}>{it.qty}</td>
                   <td style={{ ...styles.docTd, textAlign: "right" }}>{it.price.toFixed(2)}</td>
+                  {isFacture && <td style={{ ...styles.docTd, textAlign: "center" }}>{withVat ? "20%" : "0%"}</td>}
                   <td style={{ ...styles.docTd, textAlign: "right" }}>{(it.price * it.qty).toFixed(2)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <div style={styles.docTotalRow}>
-            <span>TOTAL {isFacture ? "TTC" : ""}</span>
-            <span style={styles.docTotalVal}>{order.total.toFixed(2)} DH</span>
+
+          <div style={styles.docBottomRow}>
+            <div style={styles.docWordsBox}>
+              <div style={styles.docWordsLabel}>Arrêté la présente {isFacture ? "facture" : "livraison"} à la somme de :</div>
+              <div style={styles.docWordsVal}>{amountToFrenchWords(order.total)}</div>
+            </div>
+            <div style={styles.docTotalsBlock}>
+              <div style={styles.docTotalLine}><span>Total HT</span><span>{totalHT.toFixed(2)} MAD</span></div>
+              {isFacture && <div style={styles.docTotalLine}><span>Total TVA</span><span>{totalTVA.toFixed(2)} MAD</span></div>}
+              <div style={styles.docNetPay}><span>Net à Payer</span><span>{order.total.toFixed(2)} MAD</span></div>
+            </div>
           </div>
-          {isFacture && order.vatIncluded && (
-            <div style={styles.docVatRow}>DONT TVA 20% : {vatAmount.toFixed(2)} DH</div>
-          )}
+
           {order.notes && <div style={styles.docNotes}>Notes : {order.notes}</div>}
+
           <div style={styles.docFooter}>
             {isFacture ? "Facture générée après livraison." : "Bon de livraison — la facture sera établie après livraison."}
+          </div>
+          <div style={styles.docFooterLegal}>
+            ICE: {company.ice} | RC: {company.rc} · {company.name}
           </div>
         </div>
       </div>
@@ -2376,25 +2440,33 @@ const styles = {
   vatBtnActive: { background: "#e3f0e8", color: "#1F5C3A", border: "1px solid #6FA383", borderRadius: 8, padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" },
   docVatRow: { textAlign: "right", fontSize: 12, color: "#555", marginTop: 4 },
   docPaper: { padding: "30px 32px 36px", color: "#1A1D22", fontFamily: "'Inter', sans-serif" },
-  docHead: { display: "flex", alignItems: "center", gap: 16, borderBottom: "2px solid #1A1D22", paddingBottom: 18, marginBottom: 18 },
+  docHead: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 26 },
+  docHeadLeft: { display: "flex", alignItems: "center", gap: 14 },
+  docHeadRight: { textAlign: "right" },
   docLogo: { width: 58, height: 58, objectFit: "cover", borderRadius: "50%" },
   docCompanyBlock: { display: "flex", flexDirection: "column", gap: 2 },
-  docCompanyName: { fontFamily: "'Fraunces', serif", fontWeight: 700, fontSize: 16 },
+  docCompanyName: { fontFamily: "'Fraunces', serif", fontWeight: 700, fontSize: 15 },
   docCompanyLine: { fontSize: 11, color: "#555" },
-  docTitleRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 20 },
-  docTitle: { fontFamily: "'Fraunces', serif", fontWeight: 700, fontSize: 22, letterSpacing: 1 },
-  docNumber: { fontFamily: "'Space Mono', monospace", fontSize: 13, color: "#555", marginTop: 4 },
-  docDate: { fontSize: 12.5, color: "#555" },
-  docClientBlock: { background: "#F7F5F0", borderRadius: 8, padding: "12px 16px", marginBottom: 20 },
-  docClientLabel: { fontSize: 10.5, textTransform: "uppercase", letterSpacing: 1, color: "#8A8577", marginBottom: 4 },
+  docTitleGreen: { fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 24, letterSpacing: 0.5, color: "#2FA968" },
+  docNumberBold: { fontWeight: 700, fontSize: 13, marginTop: 6, color: "#1A1D22" },
+  docDateLine: { fontSize: 12, color: "#555", marginTop: 4 },
+  docAddresseeWrap: { display: "flex", justifyContent: "flex-end", marginBottom: 22 },
+  docAddresseeBox: { background: "#F7F7F5", border: "1px solid #E6E4DC", borderRadius: 8, padding: "12px 16px", minWidth: 220, maxWidth: 280 },
+  docClientLabel: { fontSize: 10, textTransform: "uppercase", letterSpacing: 1, color: "#8A8577", marginBottom: 4, fontWeight: 700 },
   docClientName: { fontWeight: 700, fontSize: 14, marginBottom: 2 },
-  docTable: { width: "100%", borderCollapse: "collapse", marginBottom: 16 },
-  docTh: { textAlign: "left", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#8A8577", borderBottom: "1px solid #DDD", padding: "6px 4px" },
-  docTd: { fontSize: 13, padding: "8px 4px", borderBottom: "1px solid #EEE" },
-  docTotalRow: { display: "flex", justifyContent: "flex-end", gap: 14, alignItems: "baseline", fontFamily: "'Fraunces', serif", fontWeight: 700, fontSize: 16, borderTop: "2px solid #1A1D22", paddingTop: 12 },
-  docTotalVal: { fontFamily: "'Space Mono', monospace", fontSize: 19 },
+  docTable: { width: "100%", borderCollapse: "collapse", marginBottom: 20 },
+  docThGreen: { textAlign: "left", fontSize: 11, letterSpacing: 0.3, color: "#fff", background: "#2FA968", padding: "9px 10px", fontWeight: 700 },
+  docTd: { fontSize: 12.5, padding: "9px 10px", borderBottom: "1px solid #EEE" },
+  docBottomRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 20, flexWrap: "wrap", marginTop: 6 },
+  docWordsBox: { background: "#F7F7F5", borderLeft: "4px solid #2FA968", borderRadius: 4, padding: "10px 14px", flex: 1, minWidth: 200 },
+  docWordsLabel: { fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5, color: "#8A8577", fontWeight: 700, marginBottom: 4 },
+  docWordsVal: { fontStyle: "italic", fontWeight: 600, fontSize: 13 },
+  docTotalsBlock: { minWidth: 190, display: "flex", flexDirection: "column", gap: 6 },
+  docTotalLine: { display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#333" },
+  docNetPay: { display: "flex", justifyContent: "space-between", fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 15, borderTop: "2px solid #1A1D22", paddingTop: 8, marginTop: 4 },
   docNotes: { fontSize: 12, color: "#555", marginTop: 14, fontStyle: "italic" },
-  docFooter: { fontSize: 10.5, color: "#999", marginTop: 24, textAlign: "center" },
+  docFooter: { fontSize: 10.5, color: "#999", marginTop: 22, textAlign: "center" },
+  docFooterLegal: { fontSize: 9.5, color: "#AAA", marginTop: 6, textAlign: "center", borderTop: "1px solid #EEE", paddingTop: 8 },
 
   toast: { position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: "var(--c-surfacealt)", color: "var(--c-text)", border: `1px solid var(--c-border)`, padding: "10px 18px", borderRadius: 9, fontSize: 13, boxShadow: "0 10px 30px rgba(0,0,0,0.4)" },
 };
